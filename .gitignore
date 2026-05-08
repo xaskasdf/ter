@@ -1,0 +1,11 @@
+.superpowers/
+build/
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+node_modules/
