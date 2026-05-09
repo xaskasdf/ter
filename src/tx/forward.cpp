@@ -110,6 +110,47 @@ void silu_mul_kernel(Sim& sim, KernelTable& kt, KernelId id_silu,
     }
 }
 
+// Apply softmax over `n_real` values using tk_softmax kernel; pads with very
+// negative values so unused lanes contribute ~0 to the sum, then
+// host-renormalises the first n_real outputs.
+void softmax_kernel(Sim& sim, KernelTable& kt, KernelId id_sm,
+                    std::vector<float>& scores,
+                    int exp_lut_addr, int rcp_lut_addr,
+                    int /*n_pad*/) {
+    constexpr int VEC_LANES = 27;
+    constexpr int OUT_SCALE = 9841;
+    constexpr float X_STEP = 0.03125f;
+
+    int n_real = static_cast<int>(scores.size());
+    if (n_real <= 0) return;
+
+    // Pad with very negative values; exp(-10) ~ 4.5e-5 contributes ~0 to sum.
+    std::vector<float> padded(VEC_LANES, -10.0f);
+    for (int i = 0; i < n_real && i < VEC_LANES; ++i) padded[i] = scores[i];
+
+    TritTensor st = quantize(padded.data(), {VEC_LANES}, 9);
+
+    int x_addr = 1500, y_addr = 1600;
+    for (int i = 0; i < VEC_LANES; ++i)
+        sim.mem().store_word(static_cast<size_t>(x_addr + i), st.payload[i]);
+
+    int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(X_STEP / st.scale)));
+    int64_t sum_div = (VEC_LANES * static_cast<int64_t>(OUT_SCALE)) / 255;
+    std::vector<int64_t> args = {x_addr, y_addr, exp_lut_addr, rcp_lut_addr,
+                                 x_scale_div, sum_div, 0};
+    sim.call_kernel(kt, id_sm, args);
+
+    // Read first n_real values and renormalise on host.
+    std::vector<double> y_int(n_real, 0.0);
+    double sum = 0.0;
+    for (int i = 0; i < n_real; ++i) {
+        y_int[i] = static_cast<double>(sim.mem().load_word(static_cast<size_t>(y_addr + i)).to_int());
+        sum += y_int[i];
+    }
+    if (sum > 0.0) for (int i = 0; i < n_real; ++i) scores[i] = static_cast<float>(y_int[i] / sum);
+    else           for (int i = 0; i < n_real; ++i) scores[i] = 1.0f / static_cast<float>(n_real);
+}
+
 // mm_row: dot row[row] of Xt by all columns of Wt using tk_matmul_b_9t.
 // Xt is shape (1, K); Wt is shape (K, N) in row-major order.
 // Result: N float values written to `out`.
@@ -158,6 +199,7 @@ void forward_layer(
     KernelId id_mm   = kt.find("tk_matmul_b_9t");
     KernelId id_rms  = kt.find("tk_rmsnorm");
     KernelId id_silu = kt.find("tk_silu");
+    KernelId id_sm   = kt.find("tk_softmax");
 
     // ---- Attention block ----
 
@@ -217,11 +259,8 @@ void forward_layer(
             scores[t] = static_cast<float>(acc) * inv_sqrt_d;
         }
 
-        // Softmax over scores[0..pos]
-        float mx = *std::max_element(scores.begin(), scores.end());
-        double sum = 0.0;
-        for (auto& s : scores) { s = std::exp(s - mx); sum += s; }
-        for (auto& s : scores) s = static_cast<float>(s / sum);
+        // Softmax over scores[0..pos] via tk_softmax kernel (host renormalisation)
+        softmax_kernel(sim, kt, id_sm, scores, luts.exp, luts.rcp, /*n_pad*/0);
 
         // Weighted sum over V_cache[0..pos][kv_h]
         float* out_h = ctx.data() + h * head_dim;
