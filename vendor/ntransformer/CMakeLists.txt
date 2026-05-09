@@ -1,6 +1,7 @@
 add_library(nt_infra STATIC
     core/types.cpp
     core/tensor.cpp
+    core/dequant.cpp
     model/config.cpp
     model/loader.cpp
     inference/tokenizer.cpp

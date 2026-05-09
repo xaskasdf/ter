@@ -23,6 +23,9 @@ target_link_libraries(test_nt_tokenizer PRIVATE nt_infra)
 ter_add_test(test_nt_sampler)
 target_link_libraries(test_nt_sampler PRIVATE nt_infra)
 
+ter_add_test(test_nt_dequant)
+target_link_libraries(test_nt_dequant PRIVATE nt_infra)
+
 ter_add_test(test_smoke)
 ter_add_test(test_trit)
 ter_add_test(test_tryte)
