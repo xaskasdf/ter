@@ -19,7 +19,9 @@ to recreate it).
 - [x] F2 — SIMD extension (tvadd, tvmac, tvsum, ...), 64x64 matmul gate.
 - [x] F3 — Format B quantizer (bf16/float ↔ fixed-point trit + per-tensor scale).
 - [x] F4 — All kernels (matmul, rmsnorm, softmax, silu, rope) + attention via host-orchestrated composition; complete K3 transformer building blocks.
-- [ ] F5 — ntransformer bridge.
+- [x] F5.1 — vendor/ntransformer/ infra lifted (Tensor, types, config, loader, tokenizer, sampler), CUDA-stripped, smoke-tested.
+- [ ] F5.2 — TernarySim transformer logic (our own attention/ffn/norm calling our kernels).
+- [ ] F5.3 — TinyLlama smoke (load real weights, one forward pass).
 - [ ] F6 — Llama 3.2 1B end-to-end.
 
 ## Building blocks (F0-F4 complete)
