@@ -17,6 +17,56 @@ constexpr int Y_TILE     = 1200;  // matmul output tile (1 word)
 constexpr int RMS_X_ADDR = 1300;  // rmsnorm input buffer (27 words)
 constexpr int RMS_Y_ADDR = 1400;  // rmsnorm output buffer (27 words)
 
+// ---- Host-side fallbacks for N > 27 ----
+// Brandon-tiny: dim=256, intermediate=720, max_seq=512 — all > 27.
+// Kernels stay for N <= 27 (existing tests) but real models route through host.
+
+void rmsnorm_host(const std::vector<float>& x, const std::vector<float>& w,
+                  float eps, std::vector<float>& y) {
+    double ss = 0.0;
+    for (auto v : x) ss += double(v) * double(v);
+    double rms_inv = 1.0 / std::sqrt(ss / static_cast<double>(x.size()) + double(eps));
+    y.assign(x.size(), 0.0f);
+    for (size_t i = 0; i < x.size(); ++i)
+        y[i] = static_cast<float>(static_cast<double>(x[i]) * rms_inv) * w[i];
+}
+
+// Apply RoPE in-place to a head_dim vector at position pos (interleaved Llama 3 layout).
+void rope_host(std::vector<float>& v, int pos, int head_dim) {
+    int n_pairs = head_dim / 2;
+    for (int k = 0; k < n_pairs; ++k) {
+        double freq = 1.0 / std::pow(10000.0, (2.0 * k) / static_cast<double>(head_dim));
+        double angle = static_cast<double>(pos) * freq;
+        double c = std::cos(angle), s = std::sin(angle);
+        float x0 = v[2 * k], x1 = v[2 * k + 1];
+        v[2 * k]     = static_cast<float>(x0 * c - x1 * s);
+        v[2 * k + 1] = static_cast<float>(x0 * s + x1 * c);
+    }
+}
+
+// Numerically stable softmax (max-subtract).
+void softmax_host(std::vector<float>& v) {
+    if (v.empty()) return;
+    double mx = v[0];
+    for (auto x : v) if (x > mx) mx = x;
+    double sum = 0.0;
+    for (auto& x : v) {
+        x = static_cast<float>(std::exp(static_cast<double>(x) - mx));
+        sum += x;
+    }
+    if (sum > 0.0) for (auto& x : v) x = static_cast<float>(x / sum);
+}
+
+// SwiGLU element-wise: y[i] = silu(gate[i]) * up[i] = gate[i] * sigmoid(gate[i]) * up[i].
+void silu_mul_host(const std::vector<float>& gate, const std::vector<float>& up,
+                   std::vector<float>& y) {
+    y.assign(gate.size(), 0.0f);
+    for (size_t i = 0; i < gate.size(); ++i) {
+        double s = 1.0 / (1.0 + std::exp(-static_cast<double>(gate[i])));
+        y[i] = static_cast<float>(static_cast<double>(gate[i]) * s * static_cast<double>(up[i]));
+    }
+}
+
 // Apply RMSNorm via the tk_rmsnorm kernel.
 // x: input vector of length N (must be <= 27 for single-tile execution).
 // w: gain vector of length N (applied host-side; kernel doesn't do gain).
@@ -237,9 +287,12 @@ void forward_layer(
 
     // ---- Attention block ----
 
-    // 1) attn_norm: RMSNorm of hidden_in via tk_rmsnorm kernel
+    // 1) attn_norm: RMSNorm of hidden_in (kernel for N<=27, host for N>27)
     std::vector<float> x_norm;
-    rmsnorm_kernel(sim, kt, id_rms, hidden_in, L.attn_norm_w, luts.rsqrt, rmsnorm_eps, x_norm);
+    if (hidden_size <= 27)
+        rmsnorm_kernel(sim, kt, id_rms, hidden_in, L.attn_norm_w, luts.rsqrt, rmsnorm_eps, x_norm);
+    else
+        rmsnorm_host(hidden_in, L.attn_norm_w, rmsnorm_eps, x_norm);
 
     // 2) Q = x_norm @ Wq,  K = x_norm @ Wk,  V = x_norm @ Wv
     TritTensor xt = quantize(x_norm.data(), {1, hidden_size}, 9);
@@ -254,13 +307,19 @@ void forward_layer(
     for (int h = 0; h < n_heads; ++h) {
         std::vector<float> qh(q.begin() + h * head_dim,
                               q.begin() + (h + 1) * head_dim);
-        rope_kernel(sim, kt, id_rope, qh, pos, head_dim);
+        if (head_dim <= 26)  // even pairs only fit cleanly within 27 lanes
+            rope_kernel(sim, kt, id_rope, qh, pos, head_dim);
+        else
+            rope_host(qh, pos, head_dim);
         std::copy(qh.begin(), qh.end(), q.begin() + h * head_dim);
     }
     for (int h = 0; h < n_kv_heads; ++h) {
         std::vector<float> kh(k.begin() + h * head_dim,
                               k.begin() + (h + 1) * head_dim);
-        rope_kernel(sim, kt, id_rope, kh, pos, head_dim);
+        if (head_dim <= 26)
+            rope_kernel(sim, kt, id_rope, kh, pos, head_dim);
+        else
+            rope_host(kh, pos, head_dim);
         std::copy(kh.begin(), kh.end(), k.begin() + h * head_dim);
     }
 
@@ -293,8 +352,11 @@ void forward_layer(
             scores[t] = static_cast<float>(acc) * inv_sqrt_d;
         }
 
-        // Softmax over scores[0..pos] via tk_softmax kernel (host renormalisation)
-        softmax_kernel(sim, kt, id_sm, scores, luts.exp, luts.rcp, /*n_pad*/0);
+        // Softmax over scores[0..pos] (kernel for N<=27, host for longer contexts)
+        if (static_cast<int>(scores.size()) <= 27)
+            softmax_kernel(sim, kt, id_sm, scores, luts.exp, luts.rcp, /*n_pad*/0);
+        else
+            softmax_host(scores);
 
         // Weighted sum over V_cache[0..pos][kv_h]
         float* out_h = ctx.data() + h * head_dim;
@@ -320,9 +382,12 @@ void forward_layer(
 
     // ---- FFN block ----
 
-    // 7) ffn_norm: RMSNorm of hidden_mid via tk_rmsnorm kernel
+    // 7) ffn_norm: RMSNorm of hidden_mid (kernel for N<=27, host for N>27)
     std::vector<float> mid_norm;
-    rmsnorm_kernel(sim, kt, id_rms, hidden_mid, L.ffn_norm_w, luts.rsqrt, rmsnorm_eps, mid_norm);
+    if (hidden_size <= 27)
+        rmsnorm_kernel(sim, kt, id_rms, hidden_mid, L.ffn_norm_w, luts.rsqrt, rmsnorm_eps, mid_norm);
+    else
+        rmsnorm_host(hidden_mid, L.ffn_norm_w, rmsnorm_eps, mid_norm);
 
     // 8) gate = mid_norm @ Wgate;  up = mid_norm @ Wup
     TritTensor mt = quantize(mid_norm.data(), {1, hidden_size}, 9);
@@ -330,9 +395,12 @@ void forward_layer(
     mm_row(sim, kt, id_mm, mt, 0, L.Wgate, hidden_size, intermediate_size, gate);
     mm_row(sim, kt, id_mm, mt, 0, L.Wup,   hidden_size, intermediate_size, up);
 
-    // 9) SwiGLU: SiLU(gate) * up via tk_silu kernel
+    // 9) SwiGLU: SiLU(gate) * up (kernel for N<=27, host for N>27)
     std::vector<float> ff;
-    silu_mul_kernel(sim, kt, id_silu, gate, up, luts.sigmoid, ff);
+    if (intermediate_size <= 27)
+        silu_mul_kernel(sim, kt, id_silu, gate, up, luts.sigmoid, ff);
+    else
+        silu_mul_host(gate, up, ff);
 
     // 10) Wdown projection: ff_out = ff @ Wdown
     TritTensor fft = quantize(ff.data(), {1, intermediate_size}, 9);

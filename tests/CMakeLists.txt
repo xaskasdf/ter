@@ -152,3 +152,9 @@ target_link_libraries(test_brandon_config PRIVATE nt_infra)
 
 ter_add_test(test_brandon_tokenizer)
 target_link_libraries(test_brandon_tokenizer PRIVATE nt_infra)
+
+ter_add_test(test_layer_brandon_shape)
+target_compile_definitions(test_layer_brandon_shape PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_layer_brandon_shape PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
