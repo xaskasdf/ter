@@ -11,6 +11,11 @@ class Memory {
 public:
     explicit Memory(size_t n_words) : data_(n_words, 0) {}
 
+    Memory(const Memory&) = delete;
+    Memory& operator=(const Memory&) = delete;
+    Memory(Memory&&) = default;
+    Memory& operator=(Memory&&) = default;
+
     size_t size_words() const noexcept { return data_.size(); }
 
     Word27 load_word(size_t addr) const {

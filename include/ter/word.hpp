@@ -1,6 +1,7 @@
 #pragma once
 #include <ter/trit.hpp>
 #include <array>
+#include <cassert>
 #include <cstdint>
 
 namespace ter {
@@ -13,7 +14,7 @@ public:
 
     static constexpr int64_t max_int() noexcept {
         int64_t v = 1;
-        for (int i = 0; i < 27; ++i) v *= 3;
+        for (int i = 0; i < kTrits; ++i) v *= 3;
         return (v - 1) / 2;
     }
     static constexpr int64_t min_int() noexcept { return -max_int(); }
@@ -32,6 +33,7 @@ public:
         for (int i = 0; i < kTrits; ++i) if (trits_[i] != o.trits_[i]) return false;
         return true;
     }
+    constexpr bool operator!=(Word27 o) const noexcept { return !(*this == o); }
 
 private:
     std::array<Trit, kTrits> trits_{};
@@ -53,6 +55,12 @@ public:
 
     Word54 operator+(Word54 o) const noexcept;
     Word54 operator-() const noexcept;
+
+    constexpr bool operator==(Word54 o) const noexcept {
+        for (int i = 0; i < kTrits; ++i) if (trits_[i] != o.trits_[i]) return false;
+        return true;
+    }
+    constexpr bool operator!=(Word54 o) const noexcept { return !(*this == o); }
 
 private:
     std::array<Trit, kTrits> trits_{};

@@ -1,6 +1,7 @@
 #pragma once
 #include <ter/trit.hpp>
 #include <array>
+#include <cassert>
 
 namespace ter {
 
@@ -12,6 +13,7 @@ public:
     static constexpr int max_int() noexcept { return +13; }
 
     static constexpr Tryte from_int(int v) noexcept {
+        assert(v >= min_int() && v <= max_int());
         Tryte t;
         for (int i = 0; i < 3; ++i) {
             int r = ((v % 3) + 3) % 3;
@@ -43,6 +45,7 @@ public:
         for (int i = 0; i < 3; ++i) if (trits_[i] != o.trits_[i]) return false;
         return true;
     }
+    constexpr bool operator!=(Tryte o) const noexcept { return !(*this == o); }
 
 private:
     std::array<Trit, 3> trits_{};

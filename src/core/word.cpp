@@ -1,8 +1,10 @@
 #include <ter/word.hpp>
+#include <cassert>
 
 namespace ter {
 
 Word27 Word27::from_int(int64_t v) noexcept {
+    assert(v >= min_int() && v <= max_int());
     Word27 w;
     for (int i = 0; i < kTrits; ++i) {
         int r = static_cast<int>(((v % 3) + 3) % 3);
@@ -52,6 +54,8 @@ Trit sign_trit(Word27 w) noexcept {
 }
 
 Word54 Word54::from_int(int64_t v) noexcept {
+    // Word54 covers ~1.4e25; int64_t max is ~9.2e18, well inside Word54 range.
+    // No assert needed since any int64_t is representable.
     Word54 w;
     for (int i = 0; i < kTrits; ++i) {
         int r = static_cast<int>(((v % 3) + 3) % 3);
