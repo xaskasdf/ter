@@ -166,3 +166,11 @@ set_tests_properties(test_brandon_forward PROPERTIES
     FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     TIMEOUT 600)
+
+ter_add_test(test_brandon_generate)
+target_link_libraries(test_brandon_generate PRIVATE nt_infra)
+target_compile_definitions(test_brandon_generate PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_brandon_generate PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 600)

@@ -1,6 +1,7 @@
 #include "sampler.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 namespace nt {
@@ -40,6 +41,32 @@ void Sampler::apply_repeat_penalty(float* logits, int vocab_size,
             } else {
                 logits[tok] *= config_.repeat_penalty;
             }
+        }
+    }
+}
+
+void Sampler::apply_no_repeat_ngram(float* logits, int vocab_size,
+                                    const std::vector<int>& history) {
+    const int n = config_.no_repeat_ngram_size;
+    if (n < 2) return;
+    const int H = static_cast<int>(history.size());
+    if (H < n - 1) return;
+
+    // The (n-1) tokens at the tail of history form the "prefix" we want to NOT close
+    // any prior occurrence of. Scan all positions where those n-1 tokens appeared
+    // and ban the next token (history[pos + n - 1]).
+    const int prefix_len = n - 1;
+    const int* prefix = history.data() + (H - prefix_len);
+
+    for (int i = 0; i + prefix_len < H; ++i) {
+        bool match = true;
+        for (int j = 0; j < prefix_len; ++j) {
+            if (history[i + j] != prefix[j]) { match = false; break; }
+        }
+        if (!match) continue;
+        int banned = history[i + prefix_len];
+        if (banned >= 0 && banned < vocab_size) {
+            logits[banned] = -std::numeric_limits<float>::infinity();
         }
     }
 }
