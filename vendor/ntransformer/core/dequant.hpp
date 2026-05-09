@@ -12,4 +12,9 @@ void dequant_f16(const void* src, std::size_t n_elems, float* out);
 // without special-casing.
 void dequant_f32(const void* src, std::size_t n_elems, float* out);
 
+// Q8_0 block dequant. ggml format: each block holds 1 ggml_fp16_t scale (`d`)
+// followed by 32 int8 quants `qs[]`. Block size: 34 bytes; 32 elements per block.
+// n_elems must be a multiple of 32.
+void dequant_q8_0(const void* src, std::size_t n_elems, float* out);
+
 }  // namespace nt

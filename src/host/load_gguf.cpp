@@ -28,9 +28,12 @@ ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem) {
         case nt::DType::F16:
             nt::dequant_f16(t.data(), n_elems, tmp.data());
             break;
+        case nt::DType::Q8_0:
+            nt::dequant_q8_0(t.data(), n_elems, tmp.data());
+            break;
         default:
             throw std::runtime_error("tensor_to_trit: unsupported dtype "
-                                     "(only F16/F32 supported in F5.4a; Q* lands in F5.4c)");
+                                     "(F16/F32/Q8_0 supported; Q4_K_M and others land later)");
     }
 
     // Quantize via ter::quantize().

@@ -43,4 +43,20 @@ void dequant_f32(const void* src, std::size_t n_elems, float* out) {
     std::memcpy(out, src, n_elems * sizeof(float));
 }
 
+void dequant_q8_0(const void* src, std::size_t n_elems, float* out) {
+    constexpr std::size_t QK = 32;
+    const std::uint8_t* bytes = static_cast<const std::uint8_t*>(src);
+    std::size_t n_blocks = n_elems / QK;
+    for (std::size_t b = 0; b < n_blocks; ++b) {
+        const std::uint8_t* blk = bytes + b * 34;
+        std::uint16_t d_h;
+        std::memcpy(&d_h, blk, sizeof(d_h));
+        float d = half_to_float(d_h);
+        const std::int8_t* qs = reinterpret_cast<const std::int8_t*>(blk + 2);
+        for (std::size_t i = 0; i < QK; ++i) {
+            out[b * QK + i] = d * static_cast<float>(qs[i]);
+        }
+    }
+}
+
 }  // namespace nt
