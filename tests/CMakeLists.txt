@@ -128,3 +128,6 @@ set_tests_properties(test_attention PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 ter_add_test(test_layer_types)
+
+ter_add_test(test_layer_forward)
+target_compile_definitions(test_layer_forward PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
