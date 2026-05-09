@@ -7,3 +7,4 @@ endfunction()
 
 ter_add_test(test_smoke)
 ter_add_test(test_trit)
+ter_add_test(test_tryte)
