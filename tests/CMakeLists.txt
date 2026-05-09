@@ -43,3 +43,17 @@ ter_add_test(test_matmul_reference)
 set_tests_properties(test_matmul_reference PROPERTIES
     FIXTURES_REQUIRED matmul_data
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_test(NAME gen_matmul_b_data
+    COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
+            ${CMAKE_SOURCE_DIR}/tools/matmul_b_reference.py
+            --out-dir ${CMAKE_BINARY_DIR}/matmul_b_data
+            --m 8 --n 8 --k 27
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(gen_matmul_b_data PROPERTIES FIXTURES_SETUP matmul_b_data)
+
+ter_add_test(test_kernel_matmul_b_32)
+target_compile_definitions(test_kernel_matmul_b_32 PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_kernel_matmul_b_32 PROPERTIES
+    FIXTURES_REQUIRED matmul_b_data
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
