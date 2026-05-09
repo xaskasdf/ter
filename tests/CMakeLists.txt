@@ -6,3 +6,4 @@ function(ter_add_test name)
 endfunction()
 
 ter_add_test(test_smoke)
+ter_add_test(test_trit)

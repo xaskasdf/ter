@@ -1,1 +1,1 @@
-target_sources(ter PRIVATE core/_stub.cpp)
+# src sources added in F0.4

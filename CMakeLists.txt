@@ -19,10 +19,8 @@ FetchContent_Declare(doctest
     GIT_TAG v2.4.11)
 FetchContent_MakeAvailable(doctest)
 
-add_library(ter)
-target_include_directories(ter PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_compile_options(ter PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_library(ter INTERFACE)
+target_include_directories(ter INTERFACE ${CMAKE_SOURCE_DIR}/include)
 
 enable_testing()
-add_subdirectory(src)
 add_subdirectory(tests)
