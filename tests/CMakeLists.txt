@@ -99,3 +99,6 @@ target_compile_definitions(test_kernel_silu PRIVATE TER_KERNELS_DIR="${CMAKE_SOU
 set_tests_properties(test_kernel_silu PROPERTIES
     FIXTURES_REQUIRED sigmoid_lut
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+ter_add_test(test_kernel_rope)
+target_compile_definitions(test_kernel_rope PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
