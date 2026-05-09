@@ -75,7 +75,7 @@ TEST_CASE("tk_softmax matches numpy reference within bounded rel_err") {
     REQUIRE(id.valid);
 
     int x_addr = 100, y_addr = 200, exp_lut_addr = 1000, rcp_lut_addr = 2000;
-    for (int i = 0; i < N; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), xt.payload[i]);
+    for (int i = 0; i < N; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(xt.payload[i]));
     s.load_lut(exp_lut_addr, exp_lut);
     s.load_lut(rcp_lut_addr, rcp_lut);
 

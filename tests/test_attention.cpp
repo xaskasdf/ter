@@ -52,8 +52,8 @@ void mm_row(Sim& s, KernelTable& kt, KernelId id_mm,
         for (int k0 = 0; k0 < K; k0 += 27) {
             int chunk = std::min(27, K - k0);
             for (int t = 0; t < 27; ++t) {
-                int xv = (t < chunk) ? Xt.payload[row * K + (k0 + t)].to_int() : 0;
-                int wv = (t < chunk) ? Wt.payload[(k0 + t) * N + j].to_int() : 0;
+                int xv = (t < chunk) ? Xt.payload[row * K + (k0 + t)] : 0;
+                int wv = (t < chunk) ? Wt.payload[(k0 + t) * N + j] : 0;
                 s.mem().store_word(static_cast<size_t>(SCRATCH_X + t), Word27::from_int(xv));
                 s.mem().store_word(static_cast<size_t>(SCRATCH_W + t), Word27::from_int(wv));
             }
@@ -84,15 +84,15 @@ void rope_row(Sim& s, KernelTable& kt, KernelId id_rope,
         cos_vec[2 * k + 1] = c_int;
         sin_vec[2 * k]     = s_int;
         sin_vec[2 * k + 1] = s_int;
-        int x0 = xt_row.payload[2 * k].to_int();
-        int x1 = xt_row.payload[2 * k + 1].to_int();
+        int x0 = xt_row.payload[2 * k];
+        int x1 = xt_row.payload[2 * k + 1];
         rotated_x[2 * k]     = -x1;
         rotated_x[2 * k + 1] = x0;
     }
     // Place x at scratch below Q_BASE
     int xtmp = Q_BASE - VEC_LANES;
     for (int i = 0; i < VEC_LANES; ++i) {
-        s.mem().store_word(static_cast<size_t>(xtmp + i), xt_row.payload[i]);
+        s.mem().store_word(static_cast<size_t>(xtmp + i), ter::Word27::from_int(xt_row.payload[i]));
         s.mem().store_word(static_cast<size_t>(RCOS_BASE + i), Word27::from_int(cos_vec[i]));
         s.mem().store_word(static_cast<size_t>(RSIN_BASE + i), Word27::from_int(sin_vec[i]));
         s.mem().store_word(static_cast<size_t>(RROT_BASE + i), Word27::from_int(rotated_x[i]));
@@ -131,7 +131,7 @@ void softmax_row(Sim& s, KernelTable& kt, KernelId id_sm,
 
     int x_addr = SCORES_BASE + 256;  // local scratch for the quantized scores
     int y_addr = ATTN_BASE + 256;
-    for (int i = 0; i < VEC_LANES; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), st.payload[i]);
+    for (int i = 0; i < VEC_LANES; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(st.payload[i]));
 
     int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(x_step_cache / st.scale)));
     int64_t sum_div = (VEC_LANES * static_cast<int64_t>(OUT_SCALE)) / 255;

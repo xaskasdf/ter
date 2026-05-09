@@ -35,7 +35,7 @@ TritTensor quantize(const float* data, const std::vector<int>& shape, int n_trit
         int64_t r = static_cast<int64_t>(std::lround(q));
         if (r > mti)  r = mti;
         if (r < -mti) r = -mti;
-        t.payload[i] = Word27::from_int(r);
+        t.payload[i] = static_cast<int32_t>(r);
     }
     return t;
 }

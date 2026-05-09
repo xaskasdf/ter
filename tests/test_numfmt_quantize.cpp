@@ -13,7 +13,7 @@ TEST_CASE("quantize a small float vector with positive max") {
     CHECK(t.n_trits_per_elem == 9);
     CHECK(t.scale == doctest::Approx(1.0f / 9841.0f));
     REQUIRE(t.payload.size() == 4);
-    int64_t last = t.payload[3].to_int();
+    int64_t last = t.payload[3];
     CHECK(last >= 9000);
     CHECK(last <= 9841);
 }
@@ -22,15 +22,15 @@ TEST_CASE("quantize a vector of zeros yields zero scale") {
     std::vector<float> xs = {0.0f, 0.0f, 0.0f};
     TritTensor t = quantize(xs.data(), {3}, 9);
     CHECK(t.scale == 0.0f);
-    for (auto& w : t.payload) CHECK(w.to_int() == 0);
+    for (auto w : t.payload) CHECK(w == 0);
 }
 
 TEST_CASE("quantize handles negative-only input") {
     std::vector<float> xs = {-0.5f, -1.0f, -0.25f};
     TritTensor t = quantize(xs.data(), {3}, 9);
     CHECK(t.scale > 0.0f);
-    CHECK(t.payload[0].to_int() < 0);
-    CHECK(t.payload[1].to_int() < 0);
+    CHECK(t.payload[0] < 0);
+    CHECK(t.payload[1] < 0);
 }
 
 TEST_CASE("dequantize is approximate inverse of quantize") {

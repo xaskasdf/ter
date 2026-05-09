@@ -11,13 +11,15 @@ enum class DType : int {
 };
 
 // A tensor in format B: integer ternary payload + per-tensor float32 scale.
-// Each element occupies one Word27 in `payload` (lower n_trits_per_elem trits valid).
+// Payload stores the integer ternary value directly (4 bytes/elem). Kernels that
+// need a Word27 wrap on demand via Word27::from_int(payload[i]). Storing the
+// full Word27 (~108 bytes) puts a 1B-param model past 100 GB; int32 keeps it ~4 GB.
 struct TritTensor {
     DType dtype = DType::TritFP_B;
     int   n_trits_per_elem = 9;
     float scale = 0.0f;
     std::vector<int> shape;
-    std::vector<Word27> payload;
+    std::vector<int32_t> payload;
 
     size_t num_elems() const noexcept {
         if (shape.empty()) return 0;

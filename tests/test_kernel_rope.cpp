@@ -60,8 +60,8 @@ TEST_CASE("tk_rope rotates a 26-element pair-vector matching numpy reference") {
         sin_vec[2 * k]     = s_int;
         sin_vec[2 * k + 1] = s_int;
 
-        int x0_int = static_cast<int>(xt.payload[2 * k].to_int());
-        int x1_int = static_cast<int>(xt.payload[2 * k + 1].to_int());
+        int x0_int = static_cast<int>(xt.payload[2 * k]);
+        int x1_int = static_cast<int>(xt.payload[2 * k + 1]);
         rotated_x[2 * k]     = -x1_int;
         rotated_x[2 * k + 1] = x0_int;
     }
@@ -74,7 +74,7 @@ TEST_CASE("tk_rope rotates a 26-element pair-vector matching numpy reference") {
 
     int x_addr = 1000, cos_addr = 1100, sin_addr = 1200, rotx_addr = 1300, y_addr = 1400;
     for (int i = 0; i < VEC_LANES; ++i) {
-        s.mem().store_word(static_cast<size_t>(x_addr    + i), xt.payload[i]);
+        s.mem().store_word(static_cast<size_t>(x_addr    + i), ter::Word27::from_int(xt.payload[i]));
         s.mem().store_word(static_cast<size_t>(cos_addr  + i), Word27::from_int(cos_vec[i]));
         s.mem().store_word(static_cast<size_t>(sin_addr  + i), Word27::from_int(sin_vec[i]));
         s.mem().store_word(static_cast<size_t>(rotx_addr + i), Word27::from_int(rotated_x[i]));

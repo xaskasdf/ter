@@ -92,7 +92,7 @@ void rmsnorm_kernel(Sim& sim, KernelTable& kt, KernelId id_rms,
 
     // Place inputs in sim scratch memory.
     for (int i = 0; i < VEC_LANES; ++i)
-        sim.mem().store_word(static_cast<size_t>(RMS_X_ADDR + i), xt.payload[i]);
+        sim.mem().store_word(static_cast<size_t>(RMS_X_ADDR + i), ter::Word27::from_int(xt.payload[i]));
 
     // sum_div: max sum_sq for 27 lanes of |x_int| <= 9841 is 27 * 9841^2 ~ 2.6e9.
     int64_t mti = 9841;
@@ -138,15 +138,15 @@ void rope_kernel(Sim& sim, KernelTable& kt, KernelId id_rope,
         cos_vec[2 * k + 1] = c_int;
         sin_vec[2 * k]     = s_int;
         sin_vec[2 * k + 1] = s_int;
-        int x0 = xt.payload[2 * k].to_int();
-        int x1 = xt.payload[2 * k + 1].to_int();
+        int x0 = xt.payload[2 * k];
+        int x1 = xt.payload[2 * k + 1];
         rotated_x[2 * k]     = -x1;
         rotated_x[2 * k + 1] = x0;
     }
 
     int x_addr = 1700, cos_addr = 1800, sin_addr = 1900, rotx_addr = 2000, y_addr = 2100;
     for (int i = 0; i < VEC_LANES; ++i) {
-        sim.mem().store_word(static_cast<size_t>(x_addr + i), xt.payload[i]);
+        sim.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(xt.payload[i]));
         sim.mem().store_word(static_cast<size_t>(cos_addr + i), Word27::from_int(cos_vec[i]));
         sim.mem().store_word(static_cast<size_t>(sin_addr + i), Word27::from_int(sin_vec[i]));
         sim.mem().store_word(static_cast<size_t>(rotx_addr + i), Word27::from_int(rotated_x[i]));
@@ -179,7 +179,7 @@ void silu_mul_kernel(Sim& sim, KernelTable& kt, KernelId id_silu,
 
     int x_addr = 1300, y_addr = 1400;
     for (int i = 0; i < VEC_LANES; ++i)
-        sim.mem().store_word(static_cast<size_t>(x_addr + i), gt.payload[i]);
+        sim.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(gt.payload[i]));
 
     int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(X_STEP / gt.scale)));
     std::vector<int64_t> args = {x_addr, y_addr, sigmoid_lut_addr, x_scale_div, 0, 0, 0};
@@ -215,7 +215,7 @@ void softmax_kernel(Sim& sim, KernelTable& kt, KernelId id_sm,
 
     int x_addr = 1500, y_addr = 1600;
     for (int i = 0; i < VEC_LANES; ++i)
-        sim.mem().store_word(static_cast<size_t>(x_addr + i), st.payload[i]);
+        sim.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(st.payload[i]));
 
     int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(X_STEP / st.scale)));
     int64_t sum_div = (VEC_LANES * static_cast<int64_t>(OUT_SCALE)) / 255;
@@ -248,8 +248,8 @@ void mm_row(Sim& sim, KernelTable& kt, KernelId id_mm,
         for (int k0 = 0; k0 < K; k0 += 27) {
             int chunk = std::min(27, K - k0);
             for (int t = 0; t < 27; ++t) {
-                int xv = (t < chunk) ? Xt.payload[static_cast<size_t>(row * K + (k0 + t))].to_int() : 0;
-                int wv = (t < chunk) ? Wt.payload[static_cast<size_t>((k0 + t) * N + j)].to_int() : 0;
+                int xv = (t < chunk) ? Xt.payload[static_cast<size_t>(row * K + (k0 + t))] : 0;
+                int wv = (t < chunk) ? Wt.payload[static_cast<size_t>((k0 + t) * N + j)] : 0;
                 sim.mem().store_word(static_cast<size_t>(SCRATCH_X + t), Word27::from_int(xv));
                 sim.mem().store_word(static_cast<size_t>(SCRATCH_W + t), Word27::from_int(wv));
             }

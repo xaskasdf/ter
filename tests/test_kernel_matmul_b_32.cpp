@@ -47,8 +47,8 @@ TEST_CASE("format-B matmul via kernel matches numpy within bounded rel_err") {
     int x_base = 1000, w_base = 4000, y_addr = 7000;
     int scratch_x = 9000, scratch_w = 9100;
 
-    for (int idx = 0; idx < M * K; ++idx) s.mem().store_word(static_cast<size_t>(x_base + idx), At.payload[idx]);
-    for (int idx = 0; idx < K * N; ++idx) s.mem().store_word(static_cast<size_t>(w_base + idx), Bt.payload[idx]);
+    for (int idx = 0; idx < M * K; ++idx) s.mem().store_word(static_cast<size_t>(x_base + idx), ter::Word27::from_int(At.payload[idx]));
+    for (int idx = 0; idx < K * N; ++idx) s.mem().store_word(static_cast<size_t>(w_base + idx), ter::Word27::from_int(Bt.payload[idx]));
 
     std::vector<float> C(M * N);
     int tiles = (K + 26) / 27;
@@ -62,8 +62,8 @@ TEST_CASE("format-B matmul via kernel matches numpy within bounded rel_err") {
                 // Always copy through scratch buffers: ensures the W column
                 // is contiguous and X chunk is contiguous (for the next tile).
                 for (int t = 0; t < 27; ++t) {
-                    int xv = (t < chunk) ? At.payload[i * K + k0 + t].to_int() : 0;
-                    int wv = (t < chunk) ? Bt.payload[(k0 + t) * N + j].to_int() : 0;
+                    int xv = (t < chunk) ? At.payload[i * K + k0 + t] : 0;
+                    int wv = (t < chunk) ? Bt.payload[(k0 + t) * N + j] : 0;
                     s.mem().store_word(static_cast<size_t>(scratch_x + t), Word27::from_int(xv));
                     s.mem().store_word(static_cast<size_t>(scratch_w + t), Word27::from_int(wv));
                 }

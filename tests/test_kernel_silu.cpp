@@ -72,7 +72,7 @@ TEST_CASE("tk_silu matches numpy silu within bounded rel_err") {
     // Kernel code occupies addrs 0..~120; scratch hardcoded at 700-726.
     // Place data well clear: x@300, y@400, lut@1000.
     int x_addr = 300, y_addr = 400, lut_addr = 1000;
-    for (int i = 0; i < N; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), gt.payload[i]);
+    for (int i = 0; i < N; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(gt.payload[i]));
     s.load_lut(lut_addr, sigmoid_lut);
 
     int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(x_step / gt.scale)));
@@ -132,7 +132,7 @@ TEST_CASE("Full SwiGLU = silu(gate) * up via host composition") {
     // Kernel code occupies addrs 0..~120; scratch hardcoded at 700-726.
     // Place data well clear: x@300, y@400, lut@1000.
     int x_addr = 300, y_addr = 400, lut_addr = 1000;
-    for (int i = 0; i < N; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), gt.payload[i]);
+    for (int i = 0; i < N; ++i) s.mem().store_word(static_cast<size_t>(x_addr + i), ter::Word27::from_int(gt.payload[i]));
     s.load_lut(lut_addr, sigmoid_lut);
 
     int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(x_step / gt.scale)));
