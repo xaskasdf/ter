@@ -89,6 +89,41 @@ void Sim::run_one(const Instr& i) {
             regs_.set_pc(mem_.load_word(static_cast<size_t>(sp)));
             break;
         }
+        case Opcode::TAND3: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            Word27 r;
+            for (int k = 0; k < Word27::kTrits; ++k) r.set_trit(k, trit_min(a.trit(k), b.trit(k)));
+            regs_.write_scalar(i.dst, r);
+            break;
+        }
+        case Opcode::TOR3: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            Word27 r;
+            for (int k = 0; k < Word27::kTrits; ++k) r.set_trit(k, trit_max(a.trit(k), b.trit(k)));
+            regs_.write_scalar(i.dst, r);
+            break;
+        }
+        case Opcode::TXOR3: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            Word27 r;
+            for (int k = 0; k < Word27::kTrits; ++k) {
+                if (a.trit(k) == b.trit(k)) r.set_trit(k, T_ZERO);
+                else                         r.set_trit(k, -a.trit(k));
+            }
+            regs_.write_scalar(i.dst, r);
+            break;
+        }
+        case Opcode::TCMP: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            Word27 r;
+            r.set_trit(0, sign_trit(a - b));
+            regs_.write_scalar(i.dst, r);
+            break;
+        }
         default:
             throw IllegalOpcode("Sim::run_one: opcode not yet implemented");
     }
