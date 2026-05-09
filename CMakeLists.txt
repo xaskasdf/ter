@@ -23,6 +23,7 @@ add_library(ter)
 target_compile_options(ter PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_include_directories(ter PUBLIC ${CMAKE_SOURCE_DIR}/include)
 add_subdirectory(src)
+add_subdirectory(vendor/ntransformer)
 
 enable_testing()
 add_subdirectory(tests)
