@@ -43,6 +43,7 @@
 | tvshuf  | 113 | vd, vs1, imm | rotate lanes by imm |
 | tvload  | 120 | vd, rs1      | load 27 words at mem[rs1] |
 | tvstore | 121 | vs1, rs2     | store vs1 at mem[rs2] |
+| tvmul   | 122 | vd, vs1, vs2 | per-lane multiply (clamped at int32 boundary; wider than 9-trit) |
 
 ## Calling convention (F1+)
 - R1..R7 — argument and return.

@@ -71,3 +71,5 @@ target_compile_definitions(test_kernel_rmsnorm PRIVATE TER_KERNELS_DIR="${CMAKE_
 set_tests_properties(test_kernel_rmsnorm PROPERTIES
     FIXTURES_REQUIRED rsqrt_lut
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+ter_add_test(test_kernel_relocation)

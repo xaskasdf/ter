@@ -74,3 +74,23 @@ For matmul: `M * N * ceil(K / 27)` `tvmac`s, `M * N * ceil(K / 27)` `tvsum`s, `M
 - Tests with float-reference data declare a CMake fixture using `.venv/bin/python` and a tools script.
 
 Keep this file up to date as new patterns emerge.
+
+## Lessons from `tk_rmsnorm` (and three bugs found)
+
+These bugs were found while writing the first jumping kernel. Documenting so they don't regress.
+
+### Jump relocation in `KernelTable::install`
+
+The assembler resolves labels to **blob-relative indices** (label `loop` at the start of the blob = address 0). When the kernel is installed at `entry_addr > 0`, those immediates need to be shifted by `entry_addr` before being written to memory. `KernelTable::install` does this by patching TBEQ/TBNE/TBLT/TJUMP/TCALL immediate fields at install time.
+
+The first kernel ever installed (`tk_matmul_b_9t`) had no jumps, so this latent bug was invisible until `tk_rmsnorm` introduced the first looping kernel. The regression test in `tests/test_kernel_relocation.cpp` covers the install-time patcher explicitly.
+
+### `TVMUL` saturation: lane width vs intermediate
+
+Originally `Vec::set_lane` clamped to `±9841` (the 9-trit per-lane range). For `TVMUL`, intermediate products like `9841 × 9841 ≈ 1e8` saturate immediately. The fix introduces `Vec::set_lane_wide` which clamps only at the `int32_t` boundary, used by `vec_mul`. `TVMAC` still uses the int64 accumulator (acc lanes are int64 already).
+
+**Implication:** TVMUL outputs are wider than 9 trits per lane. Code that stores them back to memory via `tvstore` will lose the high bits if the destination expects 9-trit semantics. Always quantize/scale outputs before storage when chaining kernels.
+
+### Recovery formula clarity
+
+For RMSNorm, the recovery scale that converts the kernel's int output back to float is `rsq_max / (OUT_SCALE * mti)` (NOT `xt.scale * rsq_max / OUT_SCALE` as initially documented). Each LUT-based kernel needs its recovery formula derived explicitly and tested. Document it in the kernel's source comment.
