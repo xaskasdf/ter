@@ -45,6 +45,34 @@ This keeps the bridge surface small: only the transformer/attention/ffn/norm log
 
 Matmul is the bandwidth-dominant op and the cleanest to wire (we proved the pattern in F4.4). RMSNorm/Softmax/SiLU/RoPE all need per-call LUT setup (rsqrt LUT, sigmoid LUT, etc.) — each adds host-side prep code. Plumbing them all in one go alongside multi-token attention would inflate F5.2's task list. Doing them in F5.3 alongside the multi-token (KV cache) restructuring keeps each plan focused.
 
+## F5.3a result — multi-token + KV cache
+
+- Added `ter::tx::KVCache` struct: per-layer K/V tensors of shape (max_seq, n_kv_heads * head_dim), in plain `std::vector<float>` (host-side).
+- `forward_layer()` now writes the current K/V into the cache at `pos` and computes causal attention over `[0..pos+1]`.
+- Test: 4 sequential `forward_layer()` calls with shared cache match the numpy multi-token reference within bounded rel_err on H=4, HD=4, I=8, SEQ=4.
+- Matmul still routes through `tk_matmul_b_9t`; everything else (RMSNorm, RoPE, Softmax, SiLU) is host-side. F5.3b plumbs the kernels.
+
+### KV cache lives in host memory, not sim memory
+
+The cache could live in sim memory (one big region), but for now it stays as `std::vector<float>` on the host because:
+1. Attention reads the cache via host orchestration (one matmul per query position).
+2. Sim memory is the kernel's working set; cache writes/reads from sim would add DMA overhead with no gain.
+3. Future K2 (sim-resident transformer) will move the cache into sim memory.
+
+### RoPE layout convention (discovered during F5.3a.3)
+
+Llama models come in two RoPE layouts:
+- **Non-interleaved (Llama 1, 2):** pair `k` is `(v[k], v[k + n_pairs])`. The rotation acts on dims `[0, n_pairs)` paired with dims `[n_pairs, head_dim)`.
+- **Interleaved (Llama 3):** pair `k` is `(v[2k], v[2k+1])`. The rotation acts on adjacent dims.
+
+`nt::ModelConfig` has a `rope_interleaved` field for exactly this reason. Currently `src/tx/forward.cpp::rope_host()` implements non-interleaved (matching Llama 1/2 default). The earlier `tests/test_attention.cpp` and `tests/test_kernel_rope.cpp` use interleaved layout (matching `tk_rope.tasm`'s expectation that the host supplies pre-built `cos_vec`/`sin_vec`/`rotated_x` in interleaved form).
+
+**Status:** at pos=0 both layouts produce identity (angle=0 → cos=1, sin=0), so the single-token forward test (F5.2) passed regardless. The multi-token test (F5.3a.3) initially failed at pos>=1 with `max_rel ≈ 1.15` because the numpy reference and `forward.cpp::rope_host()` used different layouts.
+
+**Resolution for F5.3a:** the test's numpy reference was matched to `forward.cpp`'s non-interleaved layout. Both pass; both are internally consistent.
+
+**TODO for F5.3b/F5.4:** make `forward_layer()` honor `nt::ModelConfig::rope_interleaved` to support both Llama 1/2 (non-interleaved) and Llama 3 (interleaved). Llama 3.2 1B specifically uses interleaved per its config. The plumbed `tk_rope` kernel will need its host-side `rotated_x` builder to also handle both layouts.
+
 ## Useful API anchors
 
 - `nt::DType::TERNARY` = 9 (in `vendor/ntransformer/core/types.h`).
