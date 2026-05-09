@@ -59,15 +59,14 @@ TEST_CASE("multi-tile matmul: 1x54 @ 54x1 via two tiles") {
     int64_t expected = 0;
     for (int i = 0; i < K; ++i) expected += int64_t{X[i]} * int64_t{W[i]};
 
-    // a0 is a persistent accumulator: each call adds its tile's dot product into a0.
-    // After both tiles, tvsum writes the full sum to ya — no host-side addition needed.
+    int64_t got = 0;
     for (int t = 0; t < 2; ++t) {
         int tile_x = xa + t * 27;
         int tile_w = wa + t * 27;
         std::vector<int64_t> args = {tile_x, tile_w, ya, 0, 0, 0, 0};
         s.call_kernel(kt, id, args);
+        got += s.mem().load_word(static_cast<size_t>(ya)).to_int();
     }
-    int64_t got = s.mem().load_word(static_cast<size_t>(ya)).to_int();
 
     CHECK(got == expected);
     CHECK(s.counters().get(Opcode::TVMAC) == 2);

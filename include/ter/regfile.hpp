@@ -28,6 +28,14 @@ public:
     bool halted() const noexcept { return halted_; }
     void set_halted(bool v) noexcept { halted_ = v; }
 
+    // Zero out caller-saved registers (R8..R15, all V/A). Callee-saved (R16..R25)
+    // and PC/halted are untouched.
+    void reset_caller_saved() noexcept {
+        for (int i = 8; i <= 15; ++i) scalars_[i] = Word27{};
+        for (int i = 0; i < kVecRegs; ++i) vecs_[i] = Vec{};
+        for (int i = 0; i < kAccRegs; ++i) accs_[i] = VAccum{};
+    }
+
     static constexpr int kVecRegs = 9;
     static constexpr int kAccRegs = 3;
 

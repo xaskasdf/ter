@@ -26,6 +26,8 @@ int64_t Sim::call_kernel(KernelTable&, KernelId id,
     if (!id.valid) throw std::runtime_error("call_kernel: invalid KernelId");
     if (args.size() > 7) throw std::runtime_error("call_kernel: max 7 register args");
 
+    regs_.reset_caller_saved();
+
     for (size_t i = 0; i < args.size(); ++i) {
         regs_.write_scalar(static_cast<int>(i + 1), Word27::from_int(args[i]));
     }
