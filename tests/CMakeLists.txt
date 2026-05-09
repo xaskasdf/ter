@@ -102,3 +102,9 @@ set_tests_properties(test_kernel_silu PROPERTIES
 
 ter_add_test(test_kernel_rope)
 target_compile_definitions(test_kernel_rope PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+
+ter_add_test(test_attention)
+target_compile_definitions(test_attention PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_attention PROPERTIES
+    FIXTURES_REQUIRED "softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
