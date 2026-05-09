@@ -108,6 +108,30 @@ For the SEQ=4 test, that's ~30+ kernel calls per layer per token. Multi-token ov
 
 The thesis count comes from `OpCounters`: TVMAC + TVMUL + TVADD + TVSUM totals are the headline.
 
+## F5.4a result — brandon-tiny GGUF reads cleanly at tensor level
+
+The vendored `nt::GGUFLoader` opens brandon-tiny without rejecting (no hard `architecture == "llama"` check). Tensor data is correctly returned by `get_tensor("name")`:
+
+- `token_embd.weight`: shape (8192, 256), dtype F16 — matches brandon's vocab_size × dim.
+- Round-trip through `tensor_to_trit()` + `dequantize()` measured MSE = **2.4e-10** at scale ≈ 5.4e-5. Essentially exact recovery for the embedding tensor (it has a tight value range).
+
+What does NOT work:
+- `loader.config()` returns mostly defaults — brandon uses `brandon.*` metadata keys, the parser only knows `llama.*`. F5.4b adds the brandon parser per `~/osito-k/docs/brandon-tiny-integration.md` Step 1.
+- We don't yet read `brandon.layer_map`, `brandon.compute_layer_count`, `brandon.n_registers`, `brandon.use_dwa`, `brandon.use_value_residual`, `brandon.weight_tying`. All of these are needed for the forward pass per the integration guide.
+
+This is much better news than expected — the loader's tensor-data path is dtype-agnostic and architecture-agnostic. F5.4b is a metadata-only patch, not a loader rewrite.
+
+### Path forward (per the brandon integration guide)
+
+The user's `~/osito-k/docs/brandon-tiny-integration.md` is the canonical recipe. Future plans should:
+
+- **F5.4b**: extend GGUF metadata parser. Add the 15 `brandon.*` key handlers from the guide's Step 1. Also lift the SPM tokenizer from osito-k commit `b4b2f0e` (vendored ntransformer's tokenizer is BPE-only).
+- **F5.4c**: tile-aware rmsnorm + softmax (brandon dim=256, llama 3.2 1B dim=2048+).
+- **F5.4d**: forward pass with brandon-specific bits — `layer_map` aliasing (12 unique blocks → 24 logical), `value_residual` (V from layer 0 added to V at later layers, per-token reset), `DenseFormer DWA` (post-FFN per-layer mixing), `register prefill` (4 learnable embeddings before user content).
+- **F5.4e**: sampling recipe (temp 0.7 + rep_penalty 1.2 + no_repeat_ngram_size 3 — non-negotiable to avoid "United States" loops in the 10M model).
+
+The 7 traps from the guide are now in our memory at `ref_brandon_tiny_guide.md`. Future sessions get them automatically.
+
 ## Useful API anchors
 
 - `nt::DType::TERNARY` = 9 (in `vendor/ntransformer/core/types.h`).

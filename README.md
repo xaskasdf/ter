@@ -23,8 +23,12 @@ to recreate it).
 - [x] F5.2 — Single-layer forward (`ter::tx::forward_layer()`) via matmul kernel matches numpy (max_rel ~0.001 on tiny shapes).
 - [x] F5.3a — Multi-token attention with KV cache; sequential forward_layer over 4 positions matches numpy.
 - [x] F5.3b — All 4 transcendental kernels plumbed into forward_layer. Every arithmetic op now happens inside a kernel.
-- [ ] F5.4 — TinyLlama smoke (load real GGUF, real weights, real tokens).
-- [ ] F6 — Llama 3.2 1B end-to-end.
+- [x] F5.4a — Load brandon-tiny f16 GGUF + quantize one tensor (token_embd, MSE 2.4e-10) through Format B.
+- [ ] F5.4b — Extend GGUF metadata parser for `brandon.*` keys (loader works for tensor data; only config() is empty for non-llama arch).
+- [ ] F5.4c — Tile-aware rmsnorm/softmax for hidden_size > 27 (brandon dim=256 needs ~10 tiles).
+- [ ] F5.4d — Multi-layer Transformer + brandon-specific bits (value_residual, DWA, register prefill); first generated token.
+- [ ] F5.4e — TinyStories Q4_K_M (test the unpacker for tinier validation runs).
+- [ ] F6 — Llama 3.2 1B Q8_0 end-to-end (paper target).
 
 ## Building blocks (F0-F4 complete)
 
