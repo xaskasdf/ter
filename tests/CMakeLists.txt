@@ -126,3 +126,5 @@ target_compile_definitions(test_attention PRIVATE TER_KERNELS_DIR="${CMAKE_SOURC
 set_tests_properties(test_attention PROPERTIES
     FIXTURES_REQUIRED "softmax_luts"
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+ter_add_test(test_layer_types)

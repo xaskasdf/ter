@@ -15,4 +15,5 @@ target_sources(ter PRIVATE
     numfmt/quantize.cpp
     numfmt/dequantize.cpp
     kernels/registry.cpp
+    tx/layer.cpp
 )
