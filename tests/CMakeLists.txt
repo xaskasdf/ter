@@ -8,6 +8,9 @@ endfunction()
 ter_add_test(test_nt_types)
 target_link_libraries(test_nt_types PRIVATE nt_infra)
 
+ter_add_test(test_nt_tensor)
+target_link_libraries(test_nt_tensor PRIVATE nt_infra)
+
 ter_add_test(test_smoke)
 ter_add_test(test_trit)
 ter_add_test(test_tryte)
