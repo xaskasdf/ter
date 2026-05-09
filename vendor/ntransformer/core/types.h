@@ -142,11 +142,10 @@ struct BlockQ6_K {
 static_assert(sizeof(BlockQ6_K) == 210, "BlockQ6_K size mismatch");
 
 // ============================================================
-// Device enum
+// Device enum (CPU-only; CUDA entry stripped for vendor build)
 // ============================================================
 enum class Device : uint8_t {
     CPU  = 0,
-    CUDA = 1,
 };
 
 // ============================================================
