@@ -42,6 +42,17 @@ void Sim::run_one(const Instr& i) {
             regs_.write_scalar(i.dst, r);
             break;
         }
+        case Opcode::TLOAD: {
+            auto addr = regs_.read_scalar(i.src1).to_int();
+            regs_.write_scalar(i.dst, mem_.load_word(static_cast<size_t>(addr)));
+            break;
+        }
+        case Opcode::TSTORE: {
+            auto addr = regs_.read_scalar(i.src2).to_int();
+            auto val  = regs_.read_scalar(i.src1);
+            mem_.store_word(static_cast<size_t>(addr), val);
+            break;
+        }
         default:
             throw IllegalOpcode("Sim::run_one: opcode not yet implemented");
     }
