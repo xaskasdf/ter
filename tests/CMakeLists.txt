@@ -143,3 +143,6 @@ target_compile_definitions(test_layer_multitoken PRIVATE TER_KERNELS_DIR="${CMAK
 set_tests_properties(test_layer_multitoken PROPERTIES
     FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+ter_add_test(test_load_brandon_tiny)
+target_link_libraries(test_load_brandon_tiny PRIVATE nt_infra)
