@@ -13,8 +13,6 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-add_compile_options(-Wall -Wextra -Wpedantic -Werror)
-
 include(FetchContent)
 FetchContent_Declare(doctest
     GIT_REPOSITORY https://github.com/doctest/doctest.git
@@ -23,6 +21,7 @@ FetchContent_MakeAvailable(doctest)
 
 add_library(ter)
 target_include_directories(ter PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_compile_options(ter PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
 enable_testing()
 add_subdirectory(src)
