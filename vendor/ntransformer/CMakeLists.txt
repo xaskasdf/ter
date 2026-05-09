@@ -4,6 +4,7 @@ add_library(nt_infra STATIC
     model/config.cpp
     model/loader.cpp
     inference/tokenizer.cpp
+    inference/sampler.cpp
 )
 target_include_directories(nt_infra PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(nt_infra PRIVATE -Wall -Wextra -Wpedantic -Werror)
