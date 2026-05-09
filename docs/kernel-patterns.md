@@ -186,3 +186,35 @@ The total TVMAC count for a single attention pass is the headline metric for the
 - `TVCLEAR` opcode to explicitly zero an accumulator (currently relied on `call_kernel` reset).
 
 These are quality-of-life improvements; the core thesis is provable as-is.
+
+## F5.3b Recovery Formulas (canonical reference)
+
+These are the tested, working recovery formulas for converting a kernel's int output back to float. Use these when chaining kernels or composing with per-tensor scales.
+
+### tk_matmul_b_9t
+- Input: X quantized with `xt.scale`, W quantized with `wt.scale`.
+- Output: `y_int = sum_k(x_int[k] * w_int[k])`.
+- Recovery: `y_float = y_int * xt.scale * wt.scale`.
+
+### tk_rmsnorm
+- Input: x quantized with `xt.scale`.
+- Output: `y_int ≈ (x_int * sigmoid_int_for_rsqrt) ≈ (x / xt.scale) * (rsqrt * OUT_SCALE / rsq_max)`.
+- Recovery: `y_float = y_int * xt.scale * rsq_max / OUT_SCALE` where `rsq_max ≈ 16` (default LUT).
+- **Caveat:** padded-N effect — kernel sees zero-padded sum_sq, so for N < 27 the rsqrt is biased. Acceptable for tiny shapes; F5.4 introduces per-call scale calibration for real shapes.
+
+### tk_softmax
+- Input: scores quantized with `st.scale`.
+- Output: y_int normalisation cancels `exp_max` and `rcp_max`; `y_int ≈ exp(x) / sum_exp * OUT_SCALE^2 * N / 255`.
+- Recovery: `y_float = y_int * 255 / (OUT_SCALE^2 * N)`.
+- **Practical:** for variable-length softmax (causal attention with `pos+1` real values), pad with very negative values (e.g. -10), run the kernel, take the first `pos+1` outputs, renormalise on host. Renormalisation makes the recovery factor irrelevant.
+
+### tk_silu
+- Input: gate quantized with `gt.scale`.
+- Output: `y_int = (gate / gt.scale) * (sigmoid(gate) * OUT_SCALE)`.
+- Recovery: `silu_float = y_int * gt.scale / OUT_SCALE`. For SwiGLU: multiply by `up[i]` on host.
+
+### tk_rope
+- Input: x quantized with `xt.scale`.
+- Output: `y_int = (x_int * cos_int) + (rotated_x_int * sin_int)`, where cos_int = `round(cos(angle) * OUT_SCALE)` and similarly for sin.
+- Recovery: `y_float = y_int * xt.scale / OUT_SCALE`.
+- **Layout:** `tk_rope` expects interleaved layout (`(v[2k], v[2k+1])` per Llama 3). For Llama 1/2's non-interleaved layout, the host's `rotated_x` builder needs adjusting (deferred).

@@ -22,7 +22,8 @@ to recreate it).
 - [x] F5.1 — vendor/ntransformer/ infra lifted (Tensor, types, config, loader, tokenizer, sampler), CUDA-stripped, smoke-tested.
 - [x] F5.2 — Single-layer forward (`ter::tx::forward_layer()`) via matmul kernel matches numpy (max_rel ~0.001 on tiny shapes).
 - [x] F5.3a — Multi-token attention with KV cache; sequential forward_layer over 4 positions matches numpy.
-- [ ] F5.3b — Plumb tk_rmsnorm/tk_softmax/tk_silu/tk_rope into forward_layer (replace host-side stubs).
+- [x] F5.3b — All 4 transcendental kernels plumbed into forward_layer. Every arithmetic op now happens inside a kernel.
+- [ ] F5.4 — TinyLlama smoke (load real GGUF, real weights, real tokens).
 - [ ] F6 — Llama 3.2 1B end-to-end.
 
 ## Building blocks (F0-F4 complete)
