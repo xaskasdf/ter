@@ -24,10 +24,11 @@ to recreate it).
 - [x] F5.3a — Multi-token attention with KV cache; sequential forward_layer over 4 positions matches numpy.
 - [x] F5.3b — All 4 transcendental kernels plumbed into forward_layer. Every arithmetic op now happens inside a kernel.
 - [x] F5.4a — Load brandon-tiny f16 GGUF + quantize one tensor (token_embd, MSE 2.4e-10) through Format B.
-- [ ] F5.4b — Extend GGUF metadata parser for `brandon.*` keys (loader works for tensor data; only config() is empty for non-llama arch).
-- [ ] F5.4c — Tile-aware rmsnorm/softmax for hidden_size > 27 (brandon dim=256 needs ~10 tiles).
-- [ ] F5.4d — Multi-layer Transformer + brandon-specific bits (value_residual, DWA, register prefill); first generated token.
-- [ ] F5.4e — TinyStories Q4_K_M (test the unpacker for tinier validation runs).
+- [x] F5.4b — GGUF parser recognises all 15 `brandon.*` keys; BrandonConfig populates correctly (block_count=12, compute_layer_count=24, n_registers=4, layer_map[24], use_dwa, use_value_residual, weight_tying).
+- [ ] F5.4c — SPM tokenizer (vendored is BPE-only; brandon needs SentencePiece per integration guide Step 5).
+- [ ] F5.4d — Tile-aware rmsnorm/softmax for hidden_size > 27 (brandon dim=256 needs ~10 tiles).
+- [ ] F5.4e — Multi-layer Transformer + brandon-specific bits (value_residual, DWA, register prefill); first generated token.
+- [ ] F5.4f — TinyStories Q4_K_M (test the unpacker for tinier validation runs).
 - [ ] F6 — Llama 3.2 1B Q8_0 end-to-end (paper target).
 
 ## Building blocks (F0-F4 complete)

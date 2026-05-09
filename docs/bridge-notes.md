@@ -139,3 +139,16 @@ The 7 traps from the guide are now in our memory at `ref_brandon_tiny_guide.md`.
 - `nt::GGUFLoader::load(path)` returns bool; `.config()` returns `ModelConfig`; `.get_tensor(name)` returns a CPU `Tensor`.
 - `nt::Tokenizer::init(vocab, bos, eos)`, `.encode(text)`, `.decode(tokens)`.
 - `nt::Sampler::init(SamplerConfig)`, `.sample(logits, n)` returns `int`.
+
+## F5.4b result — brandon.* GGUF parser
+
+`vendor/ntransformer/model/loader.cpp` now recognises `brandon.layer_map` (INT32 array, captured inline alongside the existing tokenizer arrays). `vendor/ntransformer/model/config.cpp::ModelConfig::from_gguf_metadata()` gained a brandon-arch branch that:
+
+- Aliases standard dims from `brandon.*` keys (embedding_length → hidden_size, etc.)
+- Populates `BrandonConfig` (block_count=12, compute_layer_count=24, n_registers=4, n_loops=1, use_dwa=true, use_value_residual=true, weight_tying=true)
+- Stores the 24-entry `layer_map` array
+- Overrides `n_layers = compute_layer_count` so the forward loop iterates over logical layers
+
+Test `test_brandon_config.cpp` opens the real brandon-tiny GGUF and verifies all 15 fields.
+
+The implementation pattern is documented in `~/osito-k/docs/brandon-tiny-integration.md` Step 1 — the canonical recipe captured in memory at `ref_brandon_tiny_guide.md`.
