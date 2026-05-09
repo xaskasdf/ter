@@ -53,19 +53,31 @@ BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader, int ma
 
 // Forward one token through all logical layers; returns logits over vocab_size.
 //
-// hidden_in is passed as token id; the function performs the embedding lookup.
-// pos is the absolute position used for RoPE.
-// LUTs are loaded via load_default_luts() once per Sim lifetime (caller owns).
-//
-// This MVP implements only the Llama-vanilla path:
-//   embed → (rmsnorm → attn → resid → rmsnorm → ffn → resid)*N → output_norm → logits
-// Brandon-specific bits (value_residual, DWA, register prefill) land in F5.4f.
+// token_id: vocab index, or -1 to use a pre-supplied hidden vector via `hidden_override`.
+// pos: absolute position used for RoPE.
+// state: per-token brandon mods. Reset/configured by the caller (typically per chat call).
+// hidden_override: if non-null, used instead of token_embd[token_id]. Length must be hidden_size.
 std::vector<float> forward_token(
     Sim& sim,
     KernelTable& kt,
     BrandonTransformer& tx,
     int token_id,
     int pos,
-    const LutAddrs& luts);
+    const LutAddrs& luts,
+    BrandonState* state = nullptr,
+    const std::vector<float>* hidden_override = nullptr);
+
+// Run the n_registers register-token prefill (per integration guide §4d).
+// MUST be called once at the start of every chat session — KV cache for slots 0..n-1
+// must hold THIS chat's register activations, not the previous chat's. The caller is
+// responsible for resetting tx.kv_caches before this call.
+//
+// Returns the next position (= n_registers); the user's first token goes at pos = n_registers.
+int register_prefill(
+    Sim& sim,
+    KernelTable& kt,
+    BrandonTransformer& tx,
+    const LutAddrs& luts,
+    BrandonState* state);
 
 }  // namespace ter::tx

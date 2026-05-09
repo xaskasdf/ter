@@ -108,25 +108,43 @@ std::vector<float> forward_token(
     BrandonTransformer& tx,
     int token_id,
     int pos,
-    const LutAddrs& luts)
+    const LutAddrs& luts,
+    BrandonState* state,
+    const std::vector<float>* hidden_override)
 {
-    if (token_id < 0 || token_id >= tx.vocab_size) {
-        throw std::runtime_error("forward_token: token_id out of range");
-    }
-
-    // 1) Token embedding lookup.
-    // token_embd is shape (vocab_size, hidden_size) per brandon convention; rows are vocab.
-    // GGUF reverses shape labels but bytes stay row-major.
     const int H = tx.hidden_size;
     std::vector<float> hidden(static_cast<size_t>(H), 0.0f);
-    std::vector<float> emb_full(tx.token_embd.payload.size());
-    ter::dequantize(tx.token_embd, emb_full.data());
-    for (int i = 0; i < H; ++i) {
-        hidden[static_cast<size_t>(i)] =
-            emb_full[static_cast<size_t>(token_id) * static_cast<size_t>(H) + static_cast<size_t>(i)];
+    std::vector<float> emb_full;
+
+    if (hidden_override) {
+        if (static_cast<int>(hidden_override->size()) != H) {
+            throw std::runtime_error("forward_token: hidden_override size != hidden_size");
+        }
+        hidden = *hidden_override;
+    } else {
+        if (token_id < 0 || token_id >= tx.vocab_size) {
+            throw std::runtime_error("forward_token: token_id out of range");
+        }
+        // Token embedding lookup. token_embd payload is row-major (vocab_size rows, H cols).
+        emb_full.resize(tx.token_embd.payload.size());
+        ter::dequantize(tx.token_embd, emb_full.data());
+        for (int i = 0; i < H; ++i) {
+            hidden[static_cast<size_t>(i)] =
+                emb_full[static_cast<size_t>(token_id) * static_cast<size_t>(H) + static_cast<size_t>(i)];
+        }
     }
 
-    // 2) 24 logical layers via layer_map fanout.
+    // Brandon DWA: capture the pre-loop hidden vector into dwa_buf[0..H).
+    if (state && state->use_dwa) {
+        if (static_cast<int>(state->dwa_buf.size()) != (state->n_layers + 1) * H) {
+            throw std::runtime_error("forward_token: dwa_buf wrong size");
+        }
+        for (int i = 0; i < H; ++i) state->dwa_buf[static_cast<size_t>(i)] = hidden[static_cast<size_t>(i)];
+    }
+    // Brandon value_residual: reset capture flag at the start of every forward call (§4b).
+    if (state && state->use_value_residual) state->v_first_captured = false;
+
+    // 24 logical layers via layer_map fanout.
     std::vector<float> hidden_out(static_cast<size_t>(H));
     for (int L = 0; L < tx.n_layers; ++L) {
         int b_idx = tx.layer_map[static_cast<size_t>(L)];
@@ -138,8 +156,14 @@ std::vector<float> forward_token(
             hidden, pos,
             tx.hidden_size, tx.head_dim, tx.n_heads, tx.n_kv_heads,
             tx.intermediate_size, tx.rmsnorm_eps, luts,
-            hidden_out);
+            hidden_out, state, L);
         hidden = hidden_out;
+    }
+
+    // Register prefill case: hidden_override was used and we don't need logits.
+    // Skip output norm + projection entirely.
+    if (hidden_override) {
+        return {};
     }
 
     // 3) Output norm (RMSNorm with output_norm_w gain) — host-side (H=256 > 27).
@@ -165,6 +189,30 @@ std::vector<float> forward_token(
         logits[static_cast<size_t>(v)] = static_cast<float>(acc);
     }
     return logits;
+}
+
+int register_prefill(
+    Sim& sim,
+    KernelTable& kt,
+    BrandonTransformer& tx,
+    const LutAddrs& luts,
+    BrandonState* state)
+{
+    if (tx.n_registers <= 0) return 0;
+    const int H = tx.hidden_size;
+    if (static_cast<int>(tx.register_w.size()) != tx.n_registers * H) {
+        throw std::runtime_error("register_prefill: register_w wrong size");
+    }
+    for (int r = 0; r < tx.n_registers; ++r) {
+        std::vector<float> reg_emb(static_cast<size_t>(H));
+        // register_w stored row-major: row r is registers[r * H .. (r+1) * H).
+        for (int i = 0; i < H; ++i)
+            reg_emb[static_cast<size_t>(i)] = tx.register_w[static_cast<size_t>(r) * static_cast<size_t>(H)
+                                                         + static_cast<size_t>(i)];
+        // Run forward at position r without producing logits.
+        forward_token(sim, kt, tx, /*token_id=*/-1, /*pos=*/r, luts, state, &reg_emb);
+    }
+    return tx.n_registers;
 }
 
 }  // namespace ter::tx

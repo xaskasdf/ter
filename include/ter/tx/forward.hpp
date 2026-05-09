@@ -22,6 +22,22 @@ struct LutAddrs {
     int sigmoid;
 };
 
+// Per-token state for brandon-specific forward modifications.
+// Reset at the start of every forward call (NOT slot lifetime — see integration guide §4b).
+struct BrandonState {
+    // Value residual learning (§4b)
+    bool use_value_residual = false;
+    bool v_first_captured = false;     // reset to false at the start of each forward call
+    std::vector<float> v_first;        // size = n_kv_heads * head_dim, captured at layer 0
+
+    // DenseFormer DWA mixing (§4c)
+    bool use_dwa = false;
+    int  n_layers = 0;
+    int  hidden_size = 0;
+    std::vector<float> dwa_buf;        // size = (n_layers + 1) * hidden_size; dwa_buf[(L+1)*H..] holds layer L output
+    const float* dwa_weights = nullptr; // (n_layers+1)*n_layers row-major; weights[L*(n_layers+1)+j]
+};
+
 void forward_layer(
     Sim& sim,
     KernelTable& kt,
@@ -36,6 +52,8 @@ void forward_layer(
     int intermediate_size,
     float rmsnorm_eps,
     const LutAddrs& luts,
-    std::vector<float>& hidden_out);
+    std::vector<float>& hidden_out,
+    BrandonState* state = nullptr,           // nullptr = vanilla Llama
+    int layer_idx = 0);                       // for v_first capture and DWA buf indexing
 
 }  // namespace ter::tx

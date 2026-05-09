@@ -57,9 +57,24 @@ TEST_CASE("brandon-tiny: load + forward one token through 24 layers") {
     install_default_kernels(s, kt, TER_KERNELS_DIR);
     LutAddrs luts = load_default_luts(s, "lut_data");
 
-    // Forward one token. Pick id 100 — arbitrary, well within vocab.
+    // F5.4f: build BrandonState and run register prefill before the user token.
+    BrandonState state;
+    state.use_value_residual = tx.use_value_residual;
+    state.use_dwa            = tx.use_dwa;
+    state.n_layers           = tx.n_layers;
+    state.hidden_size        = tx.hidden_size;
+    if (state.use_dwa) {
+        state.dwa_buf.assign(static_cast<size_t>((tx.n_layers + 1) * tx.hidden_size), 0.0f);
+        state.dwa_weights = tx.dwa_w.data();
+    }
+
+    int next_pos = register_prefill(s, kt, tx, luts, &state);
+    MESSAGE("register prefill done; next_pos = ", next_pos);
+    CHECK(next_pos == tx.n_registers);
+
+    // Forward one user token at pos = n_registers.
     int token_id = 100;
-    auto logits = forward_token(s, kt, tx, token_id, /*pos=*/0, luts);
+    auto logits = forward_token(s, kt, tx, token_id, /*pos=*/next_pos, luts, &state);
 
     REQUIRE(logits.size() == static_cast<size_t>(tx.vocab_size));
 

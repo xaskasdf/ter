@@ -277,7 +277,9 @@ void forward_layer(
     int intermediate_size,
     float rmsnorm_eps,
     const LutAddrs& luts,
-    std::vector<float>& hidden_out)
+    std::vector<float>& hidden_out,
+    BrandonState* state,
+    int layer_idx)
 {
     KernelId id_mm   = kt.find("tk_matmul_b_9t");
     KernelId id_rms  = kt.find("tk_rmsnorm");
@@ -302,6 +304,19 @@ void forward_layer(
     mm_row(sim, kt, id_mm, xt, 0, L.Wq, hidden_size, q_dim,  q);
     mm_row(sim, kt, id_mm, xt, 0, L.Wk, hidden_size, kv_dim, k);
     mm_row(sim, kt, id_mm, xt, 0, L.Wv, hidden_size, kv_dim, v);
+
+    // 2.5) Brandon value_residual hook (§4b of integration guide).
+    // V from layer 0 is captured per-token; later layers add v_first to V (no learned alpha).
+    if (state && state->use_value_residual) {
+        if (layer_idx == 0) {
+            if (!state->v_first_captured) {
+                state->v_first.assign(v.begin(), v.end());
+                state->v_first_captured = true;
+            }
+        } else {
+            for (int i = 0; i < kv_dim; ++i) v[i] += state->v_first[static_cast<size_t>(i)];
+        }
+    }
 
     // 3) Apply RoPE to Q and K per head via tk_rope (interleaved layout)
     for (int h = 0; h < n_heads; ++h) {
@@ -412,6 +427,27 @@ void forward_layer(
     for (int i = 0; i < hidden_size; ++i)
         hidden_out[static_cast<size_t>(i)] = hidden_mid[static_cast<size_t>(i)]
                                            + ff_out[static_cast<size_t>(i)];
+
+    // 12) Brandon DWA hook (§4c). After post-FFN hidden state, mix all prior states
+    // via the dwa_weights row for this layer. dwa_buf[0] holds the pre-loop input;
+    // dwa_buf[(L+1)*H..] holds output of layer L (filled progressively).
+    if (state && state->use_dwa && state->dwa_weights) {
+        const int H  = hidden_size;
+        const int N1 = state->n_layers + 1;
+        // Store this layer's output into the buffer slot.
+        for (int i = 0; i < H; ++i)
+            state->dwa_buf[static_cast<size_t>((layer_idx + 1) * H + i)] = hidden_out[static_cast<size_t>(i)];
+        // Mix: x = sum_{j=0..layer_idx+1} w[layer_idx, j] * dwa_buf[j]
+        const float* w_row = state->dwa_weights + static_cast<size_t>(layer_idx) * static_cast<size_t>(N1);
+        for (int i = 0; i < H; ++i) hidden_out[static_cast<size_t>(i)] = 0.0f;
+        for (int j = 0; j <= layer_idx + 1; ++j) {
+            float w = w_row[j];
+            if (w == 0.0f) continue;
+            const float* src = state->dwa_buf.data() + static_cast<size_t>(j * H);
+            for (int i = 0; i < H; ++i)
+                hidden_out[static_cast<size_t>(i)] += w * src[i];
+        }
+    }
 }
 
 }  // namespace ter::tx
