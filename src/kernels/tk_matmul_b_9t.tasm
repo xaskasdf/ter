@@ -1,0 +1,9 @@
+        ; tk_matmul_b_9t — single dot product of length 27.
+        ; Args: r1 = addr_X, r2 = addr_W, r3 = addr_Y.
+        ; Loads V0 = X, V1 = W, computes A0 += sum lanes (X*W), stores at mem[r3].
+        tvload     v0, r1
+        tvload     v1, r2
+        tvmac      a0, v0, v1
+        tvsum      r4, a0
+        tstore     r4, r3
+        thalt

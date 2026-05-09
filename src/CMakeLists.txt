@@ -13,4 +13,5 @@ target_sources(ter PRIVATE
     asm/emitter.cpp
     numfmt/quantize.cpp
     numfmt/dequantize.cpp
+    kernels/registry.cpp
 )

@@ -24,4 +24,6 @@ private:
     size_t next_addr_ = 0;
 };
 
+void install_default_kernels(Sim& sim, KernelTable& kt, const std::string& kernels_dir);
+
 }
