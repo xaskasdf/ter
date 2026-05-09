@@ -1,0 +1,12 @@
+        ; sum(1..5) = 15 via repeated addition.
+        tloadi r1, 0        ; sum
+        tloadi r2, 5        ; counter
+        tloadi r3, 1
+        tloadi r4, 0
+loop:
+        tbeq   r2, r4, done
+        tadd   r1, r1, r2   ; sum += counter
+        tsub   r2, r2, r3   ; counter--
+        tjump  loop
+done:
+        thalt
