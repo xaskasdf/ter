@@ -177,6 +177,9 @@ void Sim::run_one(const Instr& i) {
                 mem_.store_word(static_cast<size_t>(base + k), Word27::from_int(v.lane(k)));
             break;
         }
+        case Opcode::TVMUL:
+            regs_.write_vec(i.dst, vec_mul(regs_.read_vec(i.src1), regs_.read_vec(i.src2)));
+            break;
         default:
             throw IllegalOpcode("Sim::run_one: opcode not yet implemented");
     }

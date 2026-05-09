@@ -24,7 +24,7 @@ bool is_valid_opcode(int64_t v) {
         case Opcode::TJUMP: case Opcode::TCALL: case Opcode::TRET:
         case Opcode::TVADD: case Opcode::TVSUB: case Opcode::TVNEG: case Opcode::TVBROADCAST:
         case Opcode::TVMAC: case Opcode::TVSUM: case Opcode::TVMAX: case Opcode::TVSHUF:
-        case Opcode::TVLOAD: case Opcode::TVSTORE:
+        case Opcode::TVLOAD: case Opcode::TVSTORE: case Opcode::TVMUL:
             return true;
     }
     return false;

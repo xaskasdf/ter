@@ -38,6 +38,7 @@ enum class Opcode : int16_t {
     TVSHUF      = 113,
     TVLOAD      = 120,
     TVSTORE     = 121,
+    TVMUL       = 122,
 };
 
 struct Instr {

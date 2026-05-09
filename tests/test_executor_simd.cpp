@@ -36,3 +36,17 @@ TEST_CASE("TVMAC accumulates and TVSUM reduces") {
     CHECK(s.regs().read_scalar(1).to_int() == 27 * 24);
     CHECK(s.counters().get(Opcode::TVMAC) == 2);
 }
+
+TEST_CASE("TVMUL lane-wise multiply with clamping") {
+    Sim s(64);
+    Instr code[] = {
+        {Opcode::TVBROADCAST, 0, 0, 0, 100},
+        {Opcode::TVBROADCAST, 1, 0, 0, 50},
+        {Opcode::TVMUL,       2, 0, 1, 0},
+        {Opcode::THALT,       0, 0, 0, 0},
+    };
+    for (size_t k = 0; k < 4; ++k) s.mem().store_word(k, encode(code[k]));
+    s.run();
+    auto v2 = s.regs().read_vec(2);
+    for (int k = 0; k < Vec::kLanes; ++k) CHECK(v2.lane(k) == 5000);
+}

@@ -1,0 +1,40 @@
+        ; tk_rmsnorm — single-tile RMSNorm of length 27 (one V-reg).
+        ; Args:
+        ;   r1 = addr_X  (27 Word27 input values)
+        ;   r2 = addr_Y  (27 Word27 output slots)
+        ;   r3 = addr_LUT (base of 256-entry rsqrt LUT)
+        ;   r4 = sum_div (per-call divisor: sum_sq / sum_div => idx)
+        ;   r5 = lut_max_idx (clamp ceiling, 255 for 256-entry LUT)
+
+        tvload      v0, r1
+        tvmac       a0, v0, v0
+        tvsum       r6, a0
+
+        tloadi      r7, 0
+        tloadi      r10, 1
+loop:
+        tblt        r6, r4, after_div
+        tblt        r7, r5, ok_step
+        tjump       after_div
+ok_step:
+        tsub        r6, r6, r4
+        tadd        r7, r7, r10
+        tjump       loop
+after_div:
+        tadd        r8, r3, r7
+        tload       r9, r8
+
+        tloadi      r11, 0
+        tloadi      r12, 27
+        tloadi      r13, 800
+bcast:
+        tbeq        r11, r12, after_bcast
+        tadd        r14, r13, r11
+        tstore      r9, r14
+        tadd        r11, r11, r10
+        tjump       bcast
+after_bcast:
+        tvload      v1, r13
+        tvmul       v2, v0, v1
+        tvstore     v2, r2
+        thalt

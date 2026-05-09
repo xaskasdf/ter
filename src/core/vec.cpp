@@ -20,6 +20,17 @@ Vec vec_neg(const Vec& a) noexcept {
     return r;
 }
 
+Vec vec_mul(const Vec& a, const Vec& b) noexcept {
+    Vec r;
+    for (int i = 0; i < Vec::kLanes; ++i) {
+        int64_t prod = int64_t{a.lane(i)} * int64_t{b.lane(i)};
+        if (prod > Vec::kLaneMax) prod = Vec::kLaneMax;
+        if (prod < Vec::kLaneMin) prod = Vec::kLaneMin;
+        r.set_lane(i, static_cast<int32_t>(prod));
+    }
+    return r;
+}
+
 Vec vec_broadcast(int32_t v) noexcept {
     Vec r;
     for (int i = 0; i < Vec::kLanes; ++i) r.set_lane(i, v);

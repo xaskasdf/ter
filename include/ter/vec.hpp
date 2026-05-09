@@ -23,6 +23,7 @@ private:
 Vec vec_add(const Vec& a, const Vec& b) noexcept;
 Vec vec_sub(const Vec& a, const Vec& b) noexcept;
 Vec vec_neg(const Vec& a) noexcept;
+Vec vec_mul(const Vec& a, const Vec& b) noexcept;
 Vec vec_broadcast(int32_t v) noexcept;
 
 struct VAccum { std::array<int64_t, Vec::kLanes> lanes{}; };

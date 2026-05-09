@@ -20,6 +20,7 @@ std::vector<Word27> assemble(const std::string& source) {
         {"tvbroadcast", Opcode::TVBROADCAST}, {"tvmac", Opcode::TVMAC}, {"tvsum", Opcode::TVSUM},
         {"tvmax", Opcode::TVMAX}, {"tvshuf", Opcode::TVSHUF},
         {"tvload", Opcode::TVLOAD}, {"tvstore", Opcode::TVSTORE},
+        {"tvmul", Opcode::TVMUL},
     };
 
     std::unordered_map<std::string, int> labels;
@@ -125,6 +126,8 @@ std::vector<Word27> assemble(const std::string& source) {
                 i.dst = vreg_at(1); i.src1 = reg_at(2); break;
             case Opcode::TVSTORE:
                 i.src1 = vreg_at(1); i.src2 = reg_at(2); break;
+            case Opcode::TVMUL:
+                i.dst = vreg_at(1); i.src1 = vreg_at(2); i.src2 = vreg_at(3); break;
             default:
                 throw AssemblerError("unsupported in F1.8 emitter");
         }
