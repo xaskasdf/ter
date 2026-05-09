@@ -48,8 +48,11 @@ struct BrandonTransformer {
 
 // Load all weights from a brandon GGUF into a BrandonTransformer.
 // Uses tensor_to_trit() for the projection weights; norms / register / dwa stay as float.
+// n_trits: Format B trits per element (default 9; bump to 12 for higher fidelity).
 // Throws std::runtime_error if a required tensor is missing.
-BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader, int max_seq_len);
+BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader,
+                                            int max_seq_len,
+                                            int n_trits = 9);
 
 // Forward one token through all logical layers; returns logits over vocab_size.
 //

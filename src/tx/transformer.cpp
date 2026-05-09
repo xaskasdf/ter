@@ -11,9 +11,9 @@ namespace ter::tx {
 
 namespace {
 
-// Quantize an nt::Tensor to TritTensor via the F5.4a bridge.
-TritTensor quant_t(const nt::Tensor& t) {
-    return ter::host::tensor_to_trit(t, 9);
+// Quantize an nt::Tensor to TritTensor via the F5.4a bridge with configurable trit width.
+TritTensor quant_t(const nt::Tensor& t, int n_trits) {
+    return ter::host::tensor_to_trit(t, n_trits);
 }
 
 // Read a float-typed tensor (F32) into a flat vector. The brandon norm/dwa weights
@@ -33,15 +33,15 @@ std::vector<float> as_floats(const nt::Tensor& t) {
 }
 
 // Build one block's LayerWeights from the loader's named tensors.
-LayerWeights build_block(const nt::GGUFLoader& loader, int b) {
+LayerWeights build_block(const nt::GGUFLoader& loader, int b, int n_trits) {
     auto pfx = std::string("blk.") + std::to_string(b) + ".";
-    auto Wq        = quant_t(loader.get_tensor(pfx + "attn_q.weight"));
-    auto Wk        = quant_t(loader.get_tensor(pfx + "attn_k.weight"));
-    auto Wv        = quant_t(loader.get_tensor(pfx + "attn_v.weight"));
-    auto Wo        = quant_t(loader.get_tensor(pfx + "attn_output.weight"));
-    auto Wgate     = quant_t(loader.get_tensor(pfx + "ffn_gate.weight"));
-    auto Wup       = quant_t(loader.get_tensor(pfx + "ffn_up.weight"));
-    auto Wdown     = quant_t(loader.get_tensor(pfx + "ffn_down.weight"));
+    auto Wq        = quant_t(loader.get_tensor(pfx + "attn_q.weight"), n_trits);
+    auto Wk        = quant_t(loader.get_tensor(pfx + "attn_k.weight"), n_trits);
+    auto Wv        = quant_t(loader.get_tensor(pfx + "attn_v.weight"), n_trits);
+    auto Wo        = quant_t(loader.get_tensor(pfx + "attn_output.weight"), n_trits);
+    auto Wgate     = quant_t(loader.get_tensor(pfx + "ffn_gate.weight"), n_trits);
+    auto Wup       = quant_t(loader.get_tensor(pfx + "ffn_up.weight"), n_trits);
+    auto Wdown     = quant_t(loader.get_tensor(pfx + "ffn_down.weight"), n_trits);
     auto attn_norm = as_floats(loader.get_tensor(pfx + "attn_norm.weight"));
     auto ffn_norm  = as_floats(loader.get_tensor(pfx + "ffn_norm.weight"));
 
@@ -60,7 +60,7 @@ LayerWeights build_block(const nt::GGUFLoader& loader, int b) {
 
 }  // namespace
 
-BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader, int max_seq_len) {
+BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader, int max_seq_len, int n_trits) {
     BrandonTransformer tx;
     const auto& cfg = loader.config();
     const auto& b   = cfg.brandon;
@@ -82,11 +82,11 @@ BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader, int ma
     // Load the 12 unique blocks.
     tx.blocks.reserve(static_cast<size_t>(b.block_count));
     for (int i = 0; i < b.block_count; ++i) {
-        tx.blocks.push_back(build_block(loader, i));
+        tx.blocks.push_back(build_block(loader, i, n_trits));
     }
 
     // Load globals.
-    tx.token_embd     = quant_t(loader.get_tensor("token_embd.weight"));
+    tx.token_embd     = quant_t(loader.get_tensor("token_embd.weight"), n_trits);
     tx.output_norm_w  = as_floats(loader.get_tensor("output_norm.weight"));
     if (b.n_registers > 0) {
         tx.register_w = as_floats(loader.get_tensor("register.weight"));
