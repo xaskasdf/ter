@@ -18,4 +18,7 @@ target_sources(ter PRIVATE
     tx/layer.cpp
     tx/forward.cpp
     tx/lut_setup.cpp
+    host/load_gguf.cpp
 )
+
+target_link_libraries(ter PUBLIC nt_infra)
