@@ -13,6 +13,21 @@ namespace nt {
 // Supports Llama, Mistral, and similar architectures
 // ============================================================
 
+struct BrandonConfig {
+    int   block_count = 0;
+    int   compute_layer_count = 0;
+    std::vector<int> layer_map;
+    int   n_registers = 0;
+    int   n_loops = 1;
+    bool  use_dwa = false;
+    bool  use_value_residual = false;
+    bool  weight_tying = false;
+
+    bool is_valid() const {
+        return block_count > 0 && static_cast<int>(layer_map.size()) == compute_layer_count;
+    }
+};
+
 struct ModelConfig {
     // Architecture
     std::string architecture = "llama";
@@ -57,6 +72,8 @@ struct ModelConfig {
     // Parse from GGUF metadata key-value pairs
     void from_gguf_metadata(
         const std::unordered_map<std::string, std::variant<int, float, std::string, bool>>& kv);
+
+    BrandonConfig brandon;
 };
 
 } // namespace nt
