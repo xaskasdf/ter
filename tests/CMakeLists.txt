@@ -182,3 +182,11 @@ set_tests_properties(test_brandon_calibrate PROPERTIES
     FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     TIMEOUT 600)
+
+ter_add_test(test_llama_smoke)
+target_link_libraries(test_llama_smoke PRIVATE nt_infra)
+target_compile_definitions(test_llama_smoke PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_llama_smoke PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 1800)

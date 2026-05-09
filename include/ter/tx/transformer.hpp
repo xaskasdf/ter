@@ -70,6 +70,17 @@ std::vector<float> forward_token(
     BrandonState* state = nullptr,
     const std::vector<float>* hidden_override = nullptr);
 
+// Load a plain Llama (e.g., Llama 3.2 1B) into the same BrandonTransformer struct
+// with identity layer_map and all brandon bits disabled. weight_tying=true: the
+// model uses token_embd as the output projection (no separate output.weight).
+//
+// vocab_size is derived from token_embd shape because llama.* GGUF metadata does
+// not include vocab_size. Other fields come from cfg.{hidden_size,n_heads,...}
+// which from_gguf_metadata populates from the architecture-prefixed keys.
+BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader,
+                                          int max_seq_len,
+                                          int n_trits = 9);
+
 // Run the n_registers register-token prefill (per integration guide §4d).
 // MUST be called once at the start of every chat session — KV cache for slots 0..n-1
 // must hold THIS chat's register activations, not the previous chat's. The caller is
