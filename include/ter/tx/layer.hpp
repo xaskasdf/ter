@@ -27,4 +27,25 @@ LayerWeights quantize_layer(
     const float* attn_norm_w, int attn_norm_n,
     const float* ffn_norm_w, int ffn_norm_n);
 
+struct KVCache {
+    int max_seq = 0;
+    int n_kv_heads = 0;
+    int head_dim = 0;
+    std::vector<float> K;   // (max_seq, n_kv_heads * head_dim)
+    std::vector<float> V;   // (max_seq, n_kv_heads * head_dim)
+
+    void resize(int new_max_seq, int new_n_kv_heads, int new_head_dim) {
+        max_seq = new_max_seq;
+        n_kv_heads = new_n_kv_heads;
+        head_dim = new_head_dim;
+        size_t n = static_cast<size_t>(max_seq) *
+                   static_cast<size_t>(n_kv_heads) *
+                   static_cast<size_t>(head_dim);
+        K.assign(n, 0.0f);
+        V.assign(n, 0.0f);
+    }
+
+    int kv_dim() const { return n_kv_heads * head_dim; }
+};
+
 }  // namespace ter::tx
