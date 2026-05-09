@@ -124,6 +124,59 @@ void Sim::run_one(const Instr& i) {
             regs_.write_scalar(i.dst, r);
             break;
         }
+        case Opcode::TVADD:
+            regs_.write_vec(i.dst, vec_add(regs_.read_vec(i.src1), regs_.read_vec(i.src2)));
+            break;
+        case Opcode::TVSUB:
+            regs_.write_vec(i.dst, vec_sub(regs_.read_vec(i.src1), regs_.read_vec(i.src2)));
+            break;
+        case Opcode::TVNEG:
+            regs_.write_vec(i.dst, vec_neg(regs_.read_vec(i.src1)));
+            break;
+        case Opcode::TVBROADCAST:
+            regs_.write_vec(i.dst, vec_broadcast(i.imm));
+            break;
+        case Opcode::TVMAC:
+            vec_mac(regs_.acc(i.dst), regs_.read_vec(i.src1), regs_.read_vec(i.src2));
+            break;
+        case Opcode::TVSUM: {
+            int64_t s_ = vec_sum(regs_.read_acc(i.src1));
+            regs_.write_scalar(i.dst, Word27::from_int(s_));
+            break;
+        }
+        case Opcode::TVMAX: {
+            auto a = regs_.read_vec(i.src1);
+            Vec r = a;
+            for (int k = 1; k < Vec::kLanes; ++k) {
+                if (r.lane(k - 1) > r.lane(k)) r.set_lane(k, r.lane(k - 1));
+            }
+            regs_.write_vec(i.dst, r);
+            break;
+        }
+        case Opcode::TVSHUF: {
+            auto a = regs_.read_vec(i.src1);
+            Vec r;
+            int n = Vec::kLanes;
+            int shift = ((i.imm % n) + n) % n;
+            for (int k = 0; k < n; ++k) r.set_lane(k, a.lane((k + shift) % n));
+            regs_.write_vec(i.dst, r);
+            break;
+        }
+        case Opcode::TVLOAD: {
+            auto base = regs_.read_scalar(i.src1).to_int();
+            Vec r;
+            for (int k = 0; k < Vec::kLanes; ++k)
+                r.set_lane(k, static_cast<int32_t>(mem_.load_word(static_cast<size_t>(base + k)).to_int()));
+            regs_.write_vec(i.dst, r);
+            break;
+        }
+        case Opcode::TVSTORE: {
+            auto base = regs_.read_scalar(i.src2).to_int();
+            auto v    = regs_.read_vec(i.src1);
+            for (int k = 0; k < Vec::kLanes; ++k)
+                mem_.store_word(static_cast<size_t>(base + k), Word27::from_int(v.lane(k)));
+            break;
+        }
         default:
             throw IllegalOpcode("Sim::run_one: opcode not yet implemented");
     }

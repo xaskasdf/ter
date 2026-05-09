@@ -1,5 +1,6 @@
 #pragma once
 #include <ter/word.hpp>
+#include <ter/vec.hpp>
 #include <array>
 #include <stdexcept>
 
@@ -27,14 +28,26 @@ public:
     bool halted() const noexcept { return halted_; }
     void set_halted(bool v) noexcept { halted_ = v; }
 
+    static constexpr int kVecRegs = 9;
+    static constexpr int kAccRegs = 3;
+
+    Vec     read_vec(int idx) const     { vcheck(idx); return vecs_[idx]; }
+    void    write_vec(int idx, Vec v)   { vcheck(idx); vecs_[idx] = v; }
+    VAccum  read_acc(int idx) const     { acheck(idx); return accs_[idx]; }
+    VAccum& acc(int idx)                { acheck(idx); return accs_[idx]; }
+
 private:
     static void check(int idx) {
         if (idx < 0 || idx >= kScalarRegs) throw std::out_of_range("RegFile index");
     }
+    static void vcheck(int idx) { if (idx<0||idx>=kVecRegs) throw std::out_of_range("vreg"); }
+    static void acheck(int idx) { if (idx<0||idx>=kAccRegs) throw std::out_of_range("acc"); }
 
     std::array<Word27, kScalarRegs> scalars_{};
     Word27 pc_{};
     bool halted_ = false;
+    std::array<Vec, kVecRegs>    vecs_{};
+    std::array<VAccum, kAccRegs> accs_{};
 };
 
 }

@@ -27,6 +27,17 @@ enum class Opcode : int16_t {
     TJUMP   = 53,
     TCALL   = 54,
     TRET    = 55,
+
+    TVADD       = 100,
+    TVSUB       = 101,
+    TVNEG       = 102,
+    TVBROADCAST = 103,
+    TVMAC       = 110,
+    TVSUM       = 111,
+    TVMAX       = 112,
+    TVSHUF      = 113,
+    TVLOAD      = 120,
+    TVSTORE     = 121,
 };
 
 struct Instr {
