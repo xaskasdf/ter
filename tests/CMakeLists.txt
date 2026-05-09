@@ -17,6 +17,9 @@ target_link_libraries(test_nt_config PRIVATE nt_infra)
 ter_add_test(test_nt_loader)
 target_link_libraries(test_nt_loader PRIVATE nt_infra)
 
+ter_add_test(test_nt_tokenizer)
+target_link_libraries(test_nt_tokenizer PRIVATE nt_infra)
+
 ter_add_test(test_smoke)
 ter_add_test(test_trit)
 ter_add_test(test_tryte)
