@@ -3,6 +3,8 @@
 #include <ter/regfile.hpp>
 #include <ter/counters.hpp>
 #include <ter/isa.hpp>
+#include <cstdint>
+#include <vector>
 
 namespace ter {
 
@@ -19,6 +21,9 @@ public:
 
     void step();
     void run();
+
+    int64_t call_kernel(class KernelTable& kt, struct KernelId id,
+                        const std::vector<int64_t>& args);
 
 private:
     void run_one(const Instr& i);
