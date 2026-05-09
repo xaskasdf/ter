@@ -9,7 +9,7 @@ public:
     constexpr explicit Trit(int v) noexcept
         : v_(static_cast<int8_t>(v < 0 ? -1 : v > 0 ? 1 : 0)) {}
 
-    constexpr int8_t value() const noexcept { return v_; }
+    constexpr int value() const noexcept { return v_; }
     constexpr bool   is_zero() const noexcept { return v_ == 0; }
 
     constexpr Trit operator-() const noexcept { return Trit{-v_}; }
@@ -43,10 +43,10 @@ constexpr TritAdd trit_full_add(Trit a, Trit b, Trit c) noexcept {
 }
 
 constexpr Trit trit_max(Trit a, Trit b) noexcept {
-    return Trit{a.value() > b.value() ? a.value() : b.value()};
+    return a.value() > b.value() ? a : b;
 }
 constexpr Trit trit_min(Trit a, Trit b) noexcept {
-    return Trit{a.value() < b.value() ? a.value() : b.value()};
+    return a.value() < b.value() ? a : b;
 }
 
 }
