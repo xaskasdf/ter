@@ -18,6 +18,7 @@ target_sources(ter PRIVATE
     tx/layer.cpp
     tx/forward.cpp
     tx/lut_setup.cpp
+    tx/transformer.cpp
     host/load_gguf.cpp
 )
 

@@ -158,3 +158,11 @@ target_compile_definitions(test_layer_brandon_shape PRIVATE TER_KERNELS_DIR="${C
 set_tests_properties(test_layer_brandon_shape PROPERTIES
     FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+ter_add_test(test_brandon_forward)
+target_link_libraries(test_brandon_forward PRIVATE nt_infra)
+target_compile_definitions(test_brandon_forward PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_brandon_forward PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 600)

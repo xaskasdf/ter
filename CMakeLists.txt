@@ -27,3 +27,7 @@ add_subdirectory(vendor/ntransformer)
 
 enable_testing()
 add_subdirectory(tests)
+
+add_executable(dump_gguf_tensors tools/dump_gguf_tensors.cpp)
+target_link_libraries(dump_gguf_tensors PRIVATE nt_infra)
+target_compile_options(dump_gguf_tensors PRIVATE -Wall -Wextra -Wpedantic -Werror)
