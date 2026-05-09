@@ -33,4 +33,8 @@ constexpr int64_t max_trit_int(int n_trits) noexcept {
     return (v - 1) / 2;
 }
 
+TritTensor quantize(const float* data,
+                    const std::vector<int>& shape,
+                    int n_trits_per_elem = 9);
+
 }

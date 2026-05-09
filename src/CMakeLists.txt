@@ -10,4 +10,5 @@ target_sources(ter PRIVATE
     isa/decode.cpp
     asm/lexer.cpp
     asm/emitter.cpp
+    numfmt/quantize.cpp
 )
