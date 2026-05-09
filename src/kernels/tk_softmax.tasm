@@ -1,0 +1,82 @@
+        ; tk_softmax — 27-element softmax via per-lane exp lookup + scale.
+        ; Args:
+        ;   r1 = addr_X
+        ;   r2 = addr_Y
+        ;   r3 = addr_EXP_LUT (256 entries)
+        ;   r4 = addr_RCP_LUT (256 entries)
+        ;   r5 = x_scale_div (x_int / r5 + 128 = exp_idx)
+        ;   r6 = sum_div (sum_int / r6 = rcp_idx)
+
+        tloadi      r10, 1
+        tloadi      r12, 27
+        tloadi      r13, 128
+        tloadi      r14, 700      ; scratch_E base
+        tloadi      r15, 800      ; scratch_bcast base
+        tloadi      r16, 0        ; running sum
+        tloadi      r11, 0        ; loop counter
+
+exp_loop:
+        tadd        r17, r1, r11
+        tload       r18, r17        ; r18 = x_int
+
+        tloadi      r19, 0          ; idx_signed
+        tblt        r18, r0, neg_div
+pos_div:
+        tblt        r18, r5, after_div
+        tsub        r18, r18, r5
+        tadd        r19, r19, r10
+        tjump       pos_div
+neg_div:
+        tadd        r21, r18, r5
+        tblt        r0, r21, after_div
+        tadd        r18, r18, r5
+        tsub        r19, r19, r10
+        tjump       neg_div
+after_div:
+        tadd        r19, r19, r13
+        tblt        r19, r0, idx_zero
+        tloadi      r22, 256
+        tblt        r19, r22, idx_ok
+        tsub        r19, r22, r10
+        tjump       idx_ok
+idx_zero:
+        tloadi      r19, 0
+idx_ok:
+        tadd        r17, r3, r19
+        tload       r23, r17        ; r23 = e_int
+
+        tadd        r17, r14, r11
+        tstore      r23, r17
+
+        tadd        r16, r16, r23
+
+        tadd        r11, r11, r10
+        tblt        r11, r12, exp_loop
+
+        tloadi      r19, 0
+rcp_div:
+        tblt        r16, r6, rcp_done
+        tsub        r16, r16, r6
+        tadd        r19, r19, r10
+        tjump       rcp_div
+rcp_done:
+        tloadi      r22, 256
+        tblt        r19, r22, rcp_ok
+        tsub        r19, r22, r10
+rcp_ok:
+        tadd        r17, r4, r19
+        tload       r24, r17        ; r24 = rcp_int
+
+        tloadi      r11, 0
+bcast_loop:
+        tadd        r17, r15, r11
+        tstore      r24, r17
+        tadd        r11, r11, r10
+        tblt        r11, r12, bcast_loop
+
+        tvload      v0, r14
+        tvload      v1, r15
+        tvmul       v2, v0, v1
+        tvstore     v2, r2
+
+        thalt
