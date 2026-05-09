@@ -26,6 +26,10 @@ void install_default_kernels(Sim& sim, KernelTable& kt, const std::string& kerne
     auto src_sm = read_text(kernels_dir + "/tk_softmax.tasm");
     auto blob_sm = assemble(src_sm);
     kt.install(sim, "tk_softmax", blob_sm);
+
+    auto src_silu = read_text(kernels_dir + "/tk_silu.tasm");
+    auto blob_silu = assemble(src_silu);
+    kt.install(sim, "tk_silu", blob_silu);
 }
 
 }

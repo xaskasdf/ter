@@ -1,0 +1,55 @@
+        ; tk_silu — 27-element silu(x) = x * sigmoid(x).
+        ; Args:
+        ;   r1 = addr_X
+        ;   r2 = addr_Y
+        ;   r3 = addr_LUT (256 sigmoid entries)
+        ;   r4 = x_scale_div (x_int / r4 + 128 = idx)
+
+        tloadi      r10, 1
+        tloadi      r12, 27
+        tloadi      r13, 128
+        tloadi      r14, 700      ; scratch_S base
+        tloadi      r11, 0        ; loop counter
+
+silu_loop:
+        tadd        r17, r1, r11
+        tload       r18, r17
+
+        tloadi      r19, 0
+        tblt        r18, r0, neg_div
+pos_div:
+        tblt        r18, r4, after_div
+        tsub        r18, r18, r4
+        tadd        r19, r19, r10
+        tjump       pos_div
+neg_div:
+        tadd        r21, r18, r4
+        tblt        r0, r21, after_div
+        tadd        r18, r18, r4
+        tsub        r19, r19, r10
+        tjump       neg_div
+after_div:
+        tadd        r19, r19, r13
+        tblt        r19, r0, idx_zero
+        tloadi      r22, 256
+        tblt        r19, r22, idx_ok
+        tsub        r19, r22, r10
+        tjump       idx_ok
+idx_zero:
+        tloadi      r19, 0
+idx_ok:
+        tadd        r17, r3, r19
+        tload       r23, r17
+
+        tadd        r17, r14, r11
+        tstore      r23, r17
+
+        tadd        r11, r11, r10
+        tblt        r11, r12, silu_loop
+
+        tvload      v0, r1
+        tvload      v1, r14
+        tvmul       v2, v0, v1
+        tvstore     v2, r2
+
+        thalt
