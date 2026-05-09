@@ -77,14 +77,36 @@ void rope_host(std::vector<float>& v, int pos, int head_dim) {
     }
 }
 
-// SiLU(gate) * up element-wise.
-// Host-only; F5.3 plumbs tk_silu.
-void silu_mul_host(const std::vector<float>& gate, const std::vector<float>& up,
-                   std::vector<float>& y) {
+// SiLU(gate) * up element-wise via tk_silu kernel.
+// gate and up must be <= 27 elements (single-tile).
+// sigmoid_lut_addr: sim address of the loaded sigmoid LUT.
+// OUT_SCALE matches gen_sigmoid_lut.py's output scale (9841).
+// X_STEP matches the LUT's x step (1/32).
+void silu_mul_kernel(Sim& sim, KernelTable& kt, KernelId id_silu,
+                     const std::vector<float>& gate, const std::vector<float>& up,
+                     int sigmoid_lut_addr,
+                     std::vector<float>& y) {
+    constexpr int VEC_LANES = 27;
+    constexpr int OUT_SCALE = 9841;
+    constexpr float X_STEP = 0.03125f;
+
+    std::vector<float> padded(VEC_LANES, 0.0f);
+    for (size_t i = 0; i < gate.size() && i < VEC_LANES; ++i) padded[i] = gate[i];
+    TritTensor gt = quantize(padded.data(), {VEC_LANES}, 9);
+
+    int x_addr = 1300, y_addr = 1400;
+    for (int i = 0; i < VEC_LANES; ++i)
+        sim.mem().store_word(static_cast<size_t>(x_addr + i), gt.payload[i]);
+
+    int64_t x_scale_div = std::max<int64_t>(1, static_cast<int64_t>(std::round(X_STEP / gt.scale)));
+    std::vector<int64_t> args = {x_addr, y_addr, sigmoid_lut_addr, x_scale_div, 0, 0, 0};
+    sim.call_kernel(kt, id_silu, args);
+
+    float recovery = gt.scale / static_cast<float>(OUT_SCALE);
     y.assign(gate.size(), 0.0f);
     for (size_t i = 0; i < gate.size(); ++i) {
-        double s = 1.0 / (1.0 + std::exp(-double(gate[i])));
-        y[i] = static_cast<float>(double(gate[i]) * s * double(up[i]));
+        float silu = static_cast<float>(sim.mem().load_word(static_cast<size_t>(y_addr + i)).to_int()) * recovery;
+        y[i] = silu * up[i];
     }
 }
 
@@ -133,8 +155,9 @@ void forward_layer(
     const LutAddrs& luts,
     std::vector<float>& hidden_out)
 {
-    KernelId id_mm  = kt.find("tk_matmul_b_9t");
-    KernelId id_rms = kt.find("tk_rmsnorm");
+    KernelId id_mm   = kt.find("tk_matmul_b_9t");
+    KernelId id_rms  = kt.find("tk_rmsnorm");
+    KernelId id_silu = kt.find("tk_silu");
 
     // ---- Attention block ----
 
@@ -234,9 +257,9 @@ void forward_layer(
     mm_row(sim, kt, id_mm, mt, 0, L.Wgate, hidden_size, intermediate_size, gate);
     mm_row(sim, kt, id_mm, mt, 0, L.Wup,   hidden_size, intermediate_size, up);
 
-    // 9) SwiGLU: SiLU(gate) * up
+    // 9) SwiGLU: SiLU(gate) * up via tk_silu kernel
     std::vector<float> ff;
-    silu_mul_host(gate, up, ff);
+    silu_mul_kernel(sim, kt, id_silu, gate, up, luts.sigmoid, ff);
 
     // 10) Wdown projection: ff_out = ff @ Wdown
     TritTensor fft = quantize(ff.data(), {1, intermediate_size}, 9);
