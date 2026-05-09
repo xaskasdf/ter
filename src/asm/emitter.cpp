@@ -16,6 +16,10 @@ std::vector<Word27> assemble(const std::string& source) {
         {"tload", Opcode::TLOAD}, {"tstore",Opcode::TSTORE},{"tloadi",Opcode::TLOADI},
         {"tbeq",  Opcode::TBEQ},  {"tbne",  Opcode::TBNE},  {"tblt", Opcode::TBLT},
         {"tjump", Opcode::TJUMP}, {"tcall", Opcode::TCALL}, {"tret", Opcode::TRET},
+        {"tvadd", Opcode::TVADD}, {"tvsub", Opcode::TVSUB}, {"tvneg", Opcode::TVNEG},
+        {"tvbroadcast", Opcode::TVBROADCAST}, {"tvmac", Opcode::TVMAC}, {"tvsum", Opcode::TVSUM},
+        {"tvmax", Opcode::TVMAX}, {"tvshuf", Opcode::TVSHUF},
+        {"tvload", Opcode::TVLOAD}, {"tvstore", Opcode::TVSTORE},
     };
 
     std::unordered_map<std::string, int> labels;
@@ -59,6 +63,20 @@ std::vector<Word27> assemble(const std::string& source) {
             if (n < 0 || n > 26) throw AssemblerError("register out of range");
             return static_cast<uint8_t>(n);
         };
+        auto vreg_at = [&](size_t k) -> uint8_t {
+            if (k >= line.size() || line[k].kind != Token::Kind::VecReg)
+                throw AssemblerError("expected vector register");
+            int n = std::stoi(line[k].text);
+            if (n < 0 || n > 8) throw AssemblerError("vreg out of range");
+            return static_cast<uint8_t>(n);
+        };
+        auto areg_at = [&](size_t k) -> uint8_t {
+            if (k >= line.size() || line[k].kind != Token::Kind::AccReg)
+                throw AssemblerError("expected accumulator register");
+            int n = std::stoi(line[k].text);
+            if (n < 0 || n > 2) throw AssemblerError("acc out of range");
+            return static_cast<uint8_t>(n);
+        };
         auto imm_at = [&](size_t k) -> int32_t {
             if (k >= line.size()) throw AssemblerError("expected immediate or label");
             const auto& tk = line[k];
@@ -89,6 +107,24 @@ std::vector<Word27> assemble(const std::string& source) {
                 i.src1 = reg_at(1); i.src2 = reg_at(2); i.imm = imm_at(3); break;
             case Opcode::TJUMP: case Opcode::TCALL:
                 i.imm = imm_at(1); break;
+            case Opcode::TVADD: case Opcode::TVSUB:
+                i.dst = vreg_at(1); i.src1 = vreg_at(2); i.src2 = vreg_at(3); break;
+            case Opcode::TVNEG:
+                i.dst = vreg_at(1); i.src1 = vreg_at(2); break;
+            case Opcode::TVBROADCAST:
+                i.dst = vreg_at(1); i.imm = imm_at(2); break;
+            case Opcode::TVMAC:
+                i.dst = areg_at(1); i.src1 = vreg_at(2); i.src2 = vreg_at(3); break;
+            case Opcode::TVSUM:
+                i.dst = reg_at(1); i.src1 = areg_at(2); break;
+            case Opcode::TVMAX:
+                i.dst = vreg_at(1); i.src1 = vreg_at(2); break;
+            case Opcode::TVSHUF:
+                i.dst = vreg_at(1); i.src1 = vreg_at(2); i.imm = imm_at(3); break;
+            case Opcode::TVLOAD:
+                i.dst = vreg_at(1); i.src1 = reg_at(2); break;
+            case Opcode::TVSTORE:
+                i.src1 = vreg_at(1); i.src2 = reg_at(2); break;
             default:
                 throw AssemblerError("unsupported in F1.8 emitter");
         }
