@@ -62,18 +62,51 @@ void rmsnorm_kernel(Sim& sim, KernelTable& kt, KernelId id_rms,
     }
 }
 
-// Apply RoPE to a head-dim vector (single token at position pos).
-// Host-only for this MVP; F5.3 plumbs tk_rope.
-void rope_host(std::vector<float>& v, int pos, int head_dim) {
+// Apply RoPE via tk_rope kernel using interleaved layout (Llama 3 / default style).
+// v: head-dim float vector, modified in-place.
+// tk_rope args: x_addr, cos_addr, sin_addr, rotated_x_addr, y_addr, 0, 0
+void rope_kernel(Sim& sim, KernelTable& kt, KernelId id_rope,
+                 std::vector<float>& v, int pos, int head_dim) {
+    constexpr int VEC_LANES = 27;
+    constexpr int OUT_SCALE = 9841;
     int n_pairs = head_dim / 2;
+
+    std::vector<float> padded(VEC_LANES, 0.0f);
+    for (int i = 0; i < head_dim; ++i) padded[i] = v[i];
+    TritTensor xt = quantize(padded.data(), {VEC_LANES}, 9);
+
+    std::vector<int> cos_vec(VEC_LANES, 0);
+    std::vector<int> sin_vec(VEC_LANES, 0);
+    std::vector<int> rotated_x(VEC_LANES, 0);
     for (int k = 0; k < n_pairs; ++k) {
-        double freq  = 1.0 / std::pow(10000.0, (2.0 * k) / double(head_dim));
+        double freq = 1.0 / std::pow(10000.0, (2.0 * k) / double(head_dim));
         double angle = double(pos) * freq;
-        double c = std::cos(angle), s = std::sin(angle);
-        float v0 = v[k];
-        float v1 = v[k + n_pairs];
-        v[k]          = static_cast<float>(double(v0) * c - double(v1) * s);
-        v[k + n_pairs] = static_cast<float>(double(v0) * s + double(v1) * c);
+        int c_int = static_cast<int>(std::round(std::cos(angle) * OUT_SCALE));
+        int s_int = static_cast<int>(std::round(std::sin(angle) * OUT_SCALE));
+        // Interleaved: element 2k = real, 2k+1 = imaginary
+        cos_vec[2 * k]     = c_int;
+        cos_vec[2 * k + 1] = c_int;
+        sin_vec[2 * k]     = s_int;
+        sin_vec[2 * k + 1] = s_int;
+        int x0 = xt.payload[2 * k].to_int();
+        int x1 = xt.payload[2 * k + 1].to_int();
+        rotated_x[2 * k]     = -x1;
+        rotated_x[2 * k + 1] = x0;
+    }
+
+    int x_addr = 1700, cos_addr = 1800, sin_addr = 1900, rotx_addr = 2000, y_addr = 2100;
+    for (int i = 0; i < VEC_LANES; ++i) {
+        sim.mem().store_word(static_cast<size_t>(x_addr + i), xt.payload[i]);
+        sim.mem().store_word(static_cast<size_t>(cos_addr + i), Word27::from_int(cos_vec[i]));
+        sim.mem().store_word(static_cast<size_t>(sin_addr + i), Word27::from_int(sin_vec[i]));
+        sim.mem().store_word(static_cast<size_t>(rotx_addr + i), Word27::from_int(rotated_x[i]));
+    }
+    std::vector<int64_t> args = {x_addr, cos_addr, sin_addr, rotx_addr, y_addr, 0, 0};
+    sim.call_kernel(kt, id_rope, args);
+
+    float recovery = xt.scale / static_cast<float>(OUT_SCALE);
+    for (int i = 0; i < head_dim; ++i) {
+        v[i] = static_cast<float>(sim.mem().load_word(static_cast<size_t>(y_addr + i)).to_int()) * recovery;
     }
 }
 
@@ -200,6 +233,7 @@ void forward_layer(
     KernelId id_rms  = kt.find("tk_rmsnorm");
     KernelId id_silu = kt.find("tk_silu");
     KernelId id_sm   = kt.find("tk_softmax");
+    KernelId id_rope = kt.find("tk_rope");
 
     // ---- Attention block ----
 
@@ -216,17 +250,17 @@ void forward_layer(
     mm_row(sim, kt, id_mm, xt, 0, L.Wk, hidden_size, kv_dim, k);
     mm_row(sim, kt, id_mm, xt, 0, L.Wv, hidden_size, kv_dim, v);
 
-    // 3) Apply RoPE to Q and K per head (before caching K — per Llama spec)
+    // 3) Apply RoPE to Q and K per head via tk_rope (interleaved layout)
     for (int h = 0; h < n_heads; ++h) {
         std::vector<float> qh(q.begin() + h * head_dim,
                               q.begin() + (h + 1) * head_dim);
-        rope_host(qh, pos, head_dim);
+        rope_kernel(sim, kt, id_rope, qh, pos, head_dim);
         std::copy(qh.begin(), qh.end(), q.begin() + h * head_dim);
     }
     for (int h = 0; h < n_kv_heads; ++h) {
         std::vector<float> kh(k.begin() + h * head_dim,
                               k.begin() + (h + 1) * head_dim);
-        rope_host(kh, pos, head_dim);
+        rope_kernel(sim, kt, id_rope, kh, pos, head_dim);
         std::copy(kh.begin(), kh.end(), k.begin() + h * head_dim);
     }
 

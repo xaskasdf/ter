@@ -52,18 +52,16 @@ std::vector<std::vector<float>> numpy_multitoken_forward(
         return y;
     };
 
-    // RoPE uses non-interleaved layout: first half are real, second half imaginary.
-    // This matches rope_host() in forward.cpp (GPT-NeoX style).
+    // RoPE uses interleaved layout (Llama 3 style): pairs are (v[2k], v[2k+1]).
+    // Matches rope_kernel() in forward.cpp which uses tk_rope.
     auto rope = [](std::vector<float>& v, int pos, int head_dim) {
-        int n_pairs = head_dim / 2;
-        for (int k = 0; k < n_pairs; ++k) {
+        for (int k = 0; k < head_dim / 2; ++k) {
             double freq = 1.0 / std::pow(10000.0, (2.0 * k) / double(head_dim));
             double angle = double(pos) * freq;
-            double c = std::cos(angle), s = std::sin(angle);
-            float v0 = v[k];
-            float v1 = v[k + n_pairs];
-            v[k]          = static_cast<float>(double(v0) * c - double(v1) * s);
-            v[k + n_pairs] = static_cast<float>(double(v0) * s + double(v1) * c);
+            double c = std::cos(angle), si = std::sin(angle);
+            float x0 = v[2 * k], x1 = v[2 * k + 1];
+            v[2 * k]     = static_cast<float>(x0 * c - x1 * si);
+            v[2 * k + 1] = static_cast<float>(x0 * si + x1 * c);
         }
     };
 
