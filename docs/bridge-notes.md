@@ -34,6 +34,17 @@ Our transformer code (in `src/host/ter_transformer.cpp`, F5.2) will:
 
 This keeps the bridge surface small: only the transformer/attention/ffn/norm logic is new code; everything around it is the user's tested infrastructure.
 
+## F5.2 result — first transformer layer running
+
+- `ter::tx::LayerWeights` holds quantized (`TritFP_B`, 9 trits) projection weights for one layer.
+- `ter::tx::forward_layer()` orchestrates one full layer: RMSNorm → Q/K/V → RoPE → trivial single-token attention (V passes through) → Wo → residual → RMSNorm → SwiGLU FFN → residual.
+- All 7 matmul projections route through `tk_matmul_b_9t`. RMSNorm/RoPE/SwiGLU/Softmax are host-side for this MVP — F5.3 plumbs them through their respective kernels alongside multi-token attention.
+- Test: `tests/test_layer_forward.cpp` — random weights at H=4, HD=4, I=8 with pos=0; measured `max_rel ≈ 7.1e-4` against numpy.
+
+### Why kernels everywhere except matmul are deferred to F5.3
+
+Matmul is the bandwidth-dominant op and the cleanest to wire (we proved the pattern in F4.4). RMSNorm/Softmax/SiLU/RoPE all need per-call LUT setup (rsqrt LUT, sigmoid LUT, etc.) — each adds host-side prep code. Plumbing them all in one go alongside multi-token attention would inflate F5.2's task list. Doing them in F5.3 alongside the multi-token (KV cache) restructuring keeps each plan focused.
+
 ## Useful API anchors
 
 - `nt::DType::TERNARY` = 9 (in `vendor/ntransformer/core/types.h`).
