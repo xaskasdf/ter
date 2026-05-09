@@ -1,0 +1,19 @@
+        ; tk_rope — element-wise RoPE rotation (pure SIMD).
+        ; Args:
+        ;   r1 = addr_X
+        ;   r2 = addr_COS  (host-prepared, lane (2k, 2k+1) = cos[k] duplicated)
+        ;   r3 = addr_SIN  (host-prepared, lane (2k, 2k+1) = sin[k] duplicated)
+        ;   r4 = addr_ROTX (host-prepared, lane (2k, 2k+1) = (-x[2k+1], x[2k]))
+        ;   r5 = addr_Y
+
+        tvload      v0, r1
+        tvload      v1, r2
+        tvload      v2, r3
+        tvload      v3, r4
+
+        tvmul       v4, v0, v1       ; x * cos
+        tvmul       v5, v3, v2       ; rotated_x * sin
+        tvadd       v6, v4, v5       ; y = x*cos + rotated_x*sin
+
+        tvstore     v6, r5
+        thalt
