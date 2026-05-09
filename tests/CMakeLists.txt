@@ -73,3 +73,16 @@ set_tests_properties(test_kernel_rmsnorm PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 
 ter_add_test(test_kernel_relocation)
+
+add_test(NAME gen_softmax_luts
+    COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
+            ${CMAKE_SOURCE_DIR}/tools/gen_softmax_luts.py
+            --out-dir ${CMAKE_BINARY_DIR}/lut_data
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(gen_softmax_luts PROPERTIES FIXTURES_SETUP softmax_luts)
+
+ter_add_test(test_kernel_softmax)
+target_compile_definitions(test_kernel_softmax PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_kernel_softmax PROPERTIES
+    FIXTURES_REQUIRED softmax_luts
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
