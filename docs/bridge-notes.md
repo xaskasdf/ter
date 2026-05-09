@@ -152,3 +152,16 @@ The 7 traps from the guide are now in our memory at `ref_brandon_tiny_guide.md`.
 Test `test_brandon_config.cpp` opens the real brandon-tiny GGUF and verifies all 15 fields.
 
 The implementation pattern is documented in `~/osito-k/docs/brandon-tiny-integration.md` Step 1 — the canonical recipe captured in memory at `ref_brandon_tiny_guide.md`.
+
+## F5.4c result — brandon SPM tokenizer works as-is
+
+Surprise: the vendored `nt::Tokenizer` already supports both SentencePiece (Llama 1/2) and GPT-2 BPE (Llama 3) modes, with **auto-detection**. The init code checks whether `Ġ` (GPT-2 byte-encoded space) is in the vocab; if not, it falls back to SPM (▁-using).
+
+For brandon-tiny: `Ġ` is NOT in the 8192-token vocab → SPM mode auto-selected. `bpe_encode()` swaps spaces for `▁` (UTF-8 `0xE2 0x96 0x81`) and runs longest-match against `token_to_id_` with byte-level fallback for unknown bytes. This matches the spec from `~/osito-k/docs/brandon-tiny-integration.md` Step 5.
+
+Test results (`test_brandon_tokenizer.cpp`):
+- vocab loads with 8192 tokens, bos=2, eos=3
+- `<|im_start|>` resolves to id 4, `<|im_end|>` to id 5 (matches guide expectation)
+- `encode("hello world")` → 3 tokens, `decode` → `"hello world"` exactly
+
+No tokenizer changes needed. F5.4d/e/f can use the existing `Tokenizer::encode()` / `decode()` directly.

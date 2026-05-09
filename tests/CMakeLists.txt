@@ -149,3 +149,6 @@ target_link_libraries(test_load_brandon_tiny PRIVATE nt_infra)
 
 ter_add_test(test_brandon_config)
 target_link_libraries(test_brandon_config PRIVATE nt_infra)
+
+ter_add_test(test_brandon_tokenizer)
+target_link_libraries(test_brandon_tokenizer PRIVATE nt_infra)
