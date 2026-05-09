@@ -75,6 +75,32 @@ For matmul: `M * N * ceil(K / 27)` `tvmac`s, `M * N * ceil(K / 27)` `tvsum`s, `M
 
 Keep this file up to date as new patterns emerge.
 
+## Lessons from `tk_softmax` (per-lane LUT lookup + recovery math)
+
+### Per-lane lookup is unavoidable without lane extract/insert opcodes
+The kernel walks 27 iterations of a software loop per call: read lane scalar from memory, compute index via signed division, `tload` from the per-element LUT, write to scratch buffer. Total per-call: ~150-200 instructions executed. Slow per-tile but correct, and counters report all of it.
+
+A future `TVEXTRACT/TVINSERT` opcode pair would let us SIMD-ify this: broadcast inputs to a vreg, do per-lane LUT via gather (would need a `TVGATHER` op too), write results back. Documented as future improvement.
+
+### Signed division by repeated subtraction
+Quantized inputs are signed (`x_int ∈ [-9841, 9841]`). The kernel branches on `tblt r18, r0, neg_div` to dispatch positive vs negative paths. Both use repeated subtraction; the negative path subtracts `r5` until the running value crosses zero from below.
+
+### Recovery formula derivation (the bug we hit)
+**This was wrong in the original plan.** Correct math for softmax:
+
+- Inputs: `x_int[i]` quantized with scale `xt.scale` such that `x[i] ≈ x_int[i] * xt.scale`.
+- exp LUT entry: `exp_lut[ei] ≈ exp(x[i]) * OUT_SCALE / exp_max`.
+- sum_E (kernel int): `sum_E ≈ sum_i(exp_lut[ei]) ≈ sum_exp * OUT_SCALE / exp_max`.
+- rcp index from `sum_div = N * OUT_SCALE / 255`: `rcp_idx ≈ sum_E / sum_div = sum_exp * 255 / (exp_max * N)`.
+- rcp LUT entry: `rcp_lut[ri] ≈ (1 / value_at_rcp_idx) * OUT_SCALE / rcp_max`. Since `value_at_rcp_idx = (rcp_idx + 1) / 256 ≈ rcp_idx / 256`, this simplifies to: `rcp_lut[ri] ≈ 256 * OUT_SCALE / (rcp_max * rcp_idx) ≈ exp_max * N * OUT_SCALE / (sum_exp * 255 * rcp_max / 256)`.
+- Product: `y_int[i] = exp_lut[ei] * rcp_lut[ri] ≈ exp(x[i]) / sum_exp * OUT_SCALE^2 * N / 255` (the `exp_max` and `rcp_max` factors cancel out).
+- **Recovery: `y[i] ≈ y_int[i] * 255 / (OUT_SCALE^2 * N)`.**
+
+The cancellation of `exp_max` and `rcp_max` is non-obvious and was missed in the spec. **Always derive the recovery formula from first principles per kernel and verify on one element by hand before committing the test.**
+
+### Counter signature
+For `tk_softmax`: 1 TVMUL, 2 TVLOAD, 1 TVSTORE, plus the per-lane scalar work: ~55 TLOAD (27 x reads + 27 exp lookups + 1 rcp lookup), 27 TSTORE for scratch_E, 27 TSTORE for scratch_bcast, plus the loop bookkeeping (TADDs, TBLTs, TJUMPs, TLOADIs). Counter checks should pin the SIMD ones exactly and use `>=` for the per-lane scalars.
+
 ## Lessons from `tk_rmsnorm` (and three bugs found)
 
 These bugs were found while writing the first jumping kernel. Documenting so they don't regress.
