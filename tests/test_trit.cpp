@@ -47,3 +47,12 @@ TEST_CASE("trit_max and trit_min") {
     CHECK(trit_max(T_NEG, T_POS) == T_POS);
     CHECK(trit_min(T_NEG, T_POS) == T_NEG);
 }
+
+TEST_CASE("trit_full_add commutative over Trit^3") {
+    for (int a : {-1, 0, 1}) for (int b : {-1, 0, 1}) for (int c : {-1, 0, 1}) {
+        auto r1 = trit_full_add(Trit{a}, Trit{b}, Trit{c});
+        auto r2 = trit_full_add(Trit{b}, Trit{a}, Trit{c});
+        CHECK(r1.sum == r2.sum);
+        CHECK(r1.carry == r2.carry);
+    }
+}
