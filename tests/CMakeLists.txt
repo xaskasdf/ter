@@ -131,3 +131,6 @@ ter_add_test(test_layer_types)
 
 ter_add_test(test_layer_forward)
 target_compile_definitions(test_layer_forward PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+
+ter_add_test(test_layer_multitoken)
+target_compile_definitions(test_layer_multitoken PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
