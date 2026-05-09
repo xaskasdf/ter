@@ -86,3 +86,16 @@ target_compile_definitions(test_kernel_softmax PRIVATE TER_KERNELS_DIR="${CMAKE_
 set_tests_properties(test_kernel_softmax PROPERTIES
     FIXTURES_REQUIRED softmax_luts
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_test(NAME gen_sigmoid_lut
+    COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
+            ${CMAKE_SOURCE_DIR}/tools/gen_sigmoid_lut.py
+            --out-dir ${CMAKE_BINARY_DIR}/lut_data
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(gen_sigmoid_lut PROPERTIES FIXTURES_SETUP sigmoid_lut)
+
+ter_add_test(test_kernel_silu)
+target_compile_definitions(test_kernel_silu PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_kernel_silu PROPERTIES
+    FIXTURES_REQUIRED sigmoid_lut
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
