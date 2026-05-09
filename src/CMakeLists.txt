@@ -1,1 +1,3 @@
-# src sources added in F0.4
+target_sources(ter PRIVATE
+    core/word.cpp
+)
