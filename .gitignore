@@ -1,5 +1,9 @@
 .superpowers/
 build/
+build_*/
+.cache/
+compile_commands.json
+*.bak
 *.o
 *.a
 *.so
