@@ -14,21 +14,17 @@
 
 using namespace ter;
 
-// RoPE kernel design constraints:
-// - TVMUL stores wide (set_lane_wide, no kLaneMax clamp).
-// - TVADD clamps to ±kLaneMax = ±9841.
-// - Therefore x must be 1-trit quantized (x_trit ∈ {-1,0,1}) and
-//   OUT_SCALE ≤ floor(9841 / sqrt(2)) = 6958 to guarantee
-//   |x_trit*cos_int + rx_trit*sin_int| ≤ 9841 for all angles.
-// - The reference is computed using the same quantized x so that the
-//   only residual error is rounding of cos/sin to integers.
+// RoPE kernel: now that TVADD/TVSUB/TVNEG use wide (int32) clamp (matching
+// TVMUL), x can be quantized with the full 9 trits and OUT_SCALE = 9841.
+// The TVADD result x*cos_int + rotated_x*sin_int fits int32 comfortably.
+// Reference is computed from the original float x (not the quantized version)
+// so that the test exercises realistic 9-trit quantization noise.
 
 TEST_CASE("tk_rope rotates a 26-element pair-vector matching numpy reference") {
     constexpr int HEAD_DIM = 26;
     constexpr int N_PAIRS  = HEAD_DIM / 2;
     constexpr int VEC_LANES = 27;
-    // OUT_SCALE ≤ 9841/sqrt(2) ≈ 6958 guarantees TVADD never clamps.
-    constexpr int OUT_SCALE = 6958;
+    constexpr int OUT_SCALE = 9841;
     constexpr int POS = 5;
 
     std::vector<float> x(VEC_LANES, 0.0f);
@@ -36,26 +32,20 @@ TEST_CASE("tk_rope rotates a 26-element pair-vector matching numpy reference") {
     std::uniform_real_distribution<float> dist(-2.0f, 2.0f);
     for (int i = 0; i < HEAD_DIM; ++i) x[i] = dist(rng);
 
-    // 1-trit quantize: payload ∈ {-1, 0, +1}, scale = max|x|.
-    // Using n_trits_per_elem=1 keeps |x_trit * cos_int| ≤ OUT_SCALE ≤ 9841.
-    TritTensor xt = quantize(x.data(), {VEC_LANES}, 1);
-
-    // Reference: numpy-style RoPE computed with the quantized x values so that
-    // only rounding of cos/sin integers contributes to error.
-    std::vector<float> x_q(VEC_LANES, 0.0f);
-    for (int i = 0; i < HEAD_DIM; ++i)
-        x_q[i] = static_cast<float>(xt.payload[i].to_int()) * xt.scale;
-
+    // Reference: numpy-style RoPE from the original float x.
     std::vector<float> y_ref(VEC_LANES, 0.0f);
     for (int k = 0; k < N_PAIRS; ++k) {
         double freq  = 1.0 / std::pow(10000.0, (2.0 * k) / double(HEAD_DIM));
         double angle = double(POS) * freq;
         double c = std::cos(angle);
         double s = std::sin(angle);
-        double x0 = x_q[2 * k], x1 = x_q[2 * k + 1];
+        double x0 = x[2 * k], x1 = x[2 * k + 1];
         y_ref[2 * k]     = static_cast<float>(x0 * c - x1 * s);
         y_ref[2 * k + 1] = static_cast<float>(x0 * s + x1 * c);
     }
+
+    // 9-trit quantize: realistic per-tensor fixed-point encoding.
+    TritTensor xt = quantize(x.data(), {VEC_LANES}, 9);
 
     std::vector<int> cos_vec(VEC_LANES, 0);
     std::vector<int> sin_vec(VEC_LANES, 0);
@@ -93,8 +83,7 @@ TEST_CASE("tk_rope rotates a 26-element pair-vector matching numpy reference") {
     std::vector<int64_t> args = {x_addr, cos_addr, sin_addr, rotx_addr, y_addr, 0, 0};
     s.call_kernel(kt, id, args);
 
-    // Recovery: y_trit = (x_trit * cos_int + rx_trit * sin_int)
-    // y_float  = y_trit * xt.scale / OUT_SCALE
+    // recovery = xt.scale / OUT_SCALE converts integer lane values back to float.
     float recovery = xt.scale / static_cast<float>(OUT_SCALE);
     std::vector<float> y(VEC_LANES);
     for (int i = 0; i < VEC_LANES; ++i) {
@@ -111,7 +100,7 @@ TEST_CASE("tk_rope rotates a 26-element pair-vector matching numpy reference") {
         double rel   = std::fabs(got - ref) / denom;
         if (rel > max_rel) max_rel = rel;
     }
-    CHECK(max_rel < 5e-2);
+    CHECK(max_rel < 1e-1);  // generous: full 9-trit quantization noise included
 
     CHECK(s.counters().get(Opcode::TVLOAD)  == 4);
     CHECK(s.counters().get(Opcode::TVMUL)   == 2);

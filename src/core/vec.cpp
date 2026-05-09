@@ -1,22 +1,40 @@
 #include <ter/vec.hpp>
+#include <algorithm>
+#include <limits>
 
 namespace ter {
 
 Vec vec_add(const Vec& a, const Vec& b) noexcept {
     Vec r;
-    for (int i = 0; i < Vec::kLanes; ++i) r.set_lane(i, a.lane(i) + b.lane(i));
+    for (int i = 0; i < Vec::kLanes; ++i) {
+        int64_t s = int64_t{a.lane(i)} + int64_t{b.lane(i)};
+        r.set_lane_wide(i, static_cast<int32_t>(std::clamp<int64_t>(s,
+            std::numeric_limits<int32_t>::min(),
+            std::numeric_limits<int32_t>::max())));
+    }
     return r;
 }
 
 Vec vec_sub(const Vec& a, const Vec& b) noexcept {
     Vec r;
-    for (int i = 0; i < Vec::kLanes; ++i) r.set_lane(i, a.lane(i) - b.lane(i));
+    for (int i = 0; i < Vec::kLanes; ++i) {
+        int64_t s = int64_t{a.lane(i)} - int64_t{b.lane(i)};
+        r.set_lane_wide(i, static_cast<int32_t>(std::clamp<int64_t>(s,
+            std::numeric_limits<int32_t>::min(),
+            std::numeric_limits<int32_t>::max())));
+    }
     return r;
 }
 
 Vec vec_neg(const Vec& a) noexcept {
     Vec r;
-    for (int i = 0; i < Vec::kLanes; ++i) r.set_lane(i, -a.lane(i));
+    for (int i = 0; i < Vec::kLanes; ++i) {
+        // -INT32_MIN overflows; clamp to INT32_MAX.
+        int32_t v = a.lane(i);
+        if (v == std::numeric_limits<int32_t>::min()) v = std::numeric_limits<int32_t>::max();
+        else v = -v;
+        r.set_lane_wide(i, v);
+    }
     return r;
 }
 
