@@ -86,6 +86,7 @@ bool GGUFLoader::parse_header() {
     std::vector<std::string> vocab_tokens;
     std::vector<float> vocab_scores;
     std::vector<int> vocab_types;
+    std::vector<int> brandon_layer_map;  // brandon.layer_map INT32 array
 
     for (uint64_t i = 0; i < n_kv; i++) {
         std::string key = read_string(ptr);
@@ -116,6 +117,12 @@ bool GGUFLoader::parse_header() {
                     vocab_types.push_back(*reinterpret_cast<const int32_t*>(ptr));
                     ptr += 4;
                 }
+            } else if (key == "brandon.layer_map" && elem_type == GGUFType::INT32) {
+                brandon_layer_map.reserve(n_elems);
+                for (uint64_t j = 0; j < n_elems; j++) {
+                    brandon_layer_map.push_back(*reinterpret_cast<const int32_t*>(ptr));
+                    ptr += 4;
+                }
             } else {
                 // Skip array elements we don't need
                 for (uint64_t j = 0; j < n_elems; j++) {
@@ -128,8 +135,8 @@ bool GGUFLoader::parse_header() {
         }
     }
 
-    // Build config
-    config_.from_gguf_metadata(metadata);
+    // Build config (pass brandon_layer_map separately since arrays don't fit in the kv variant map)
+    config_.from_gguf_metadata(metadata, std::move(brandon_layer_map));
 
     // Build vocab
     vocab_.tokens = std::move(vocab_tokens);

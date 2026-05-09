@@ -16,7 +16,8 @@ static T get_val(
 }
 
 void ModelConfig::from_gguf_metadata(
-    const std::unordered_map<std::string, std::variant<int, float, std::string, bool>>& kv
+    const std::unordered_map<std::string, std::variant<int, float, std::string, bool>>& kv,
+    std::vector<int> brandon_layer_map
 ) {
     metadata = kv;
 
@@ -47,6 +48,32 @@ void ModelConfig::from_gguf_metadata(
     // Tokens
     bos_token_id      = get_val<int>(kv, "tokenizer.ggml.bos_token_id", bos_token_id);
     eos_token_id      = get_val<int>(kv, "tokenizer.ggml.eos_token_id", eos_token_id);
+
+    // brandon-arch metadata: populate BrandonConfig and override n_layers so
+    // the forward loop iterates over compute_layer_count logical layers.
+    if (architecture == "brandon") {
+        // head_dim for brandon comes from rope.dimension_count (not hidden/n_heads).
+        head_dim = get_val<int>(kv, "brandon.rope.dimension_count", head_dim);
+
+        // Brandon-specific fields.
+        brandon.block_count         = get_val<int>(kv,  "brandon.block_count",         0);
+        brandon.compute_layer_count = get_val<int>(kv,  "brandon.compute_layer_count", 0);
+        brandon.n_registers         = get_val<int>(kv,  "brandon.n_registers",         0);
+        brandon.n_loops             = get_val<int>(kv,  "brandon.n_loops",             1);
+        brandon.use_dwa             = get_val<bool>(kv, "brandon.use_dwa",             false);
+        brandon.use_value_residual  = get_val<bool>(kv, "brandon.use_value_residual",  false);
+        brandon.weight_tying        = get_val<bool>(kv, "brandon.weight_tying",        false);
+
+        // layer_map is an INT32 array captured by the loader and passed in separately.
+        brandon.layer_map           = std::move(brandon_layer_map);
+
+        // Override n_layers: for brandon the forward loop iterates over
+        // compute_layer_count logical layers (which fan out into block_count
+        // unique parameter blocks via layer_map).
+        if (brandon.compute_layer_count > 0) {
+            n_layers = brandon.compute_layer_count;
+        }
+    }
 }
 
 void ModelConfig::print() const {

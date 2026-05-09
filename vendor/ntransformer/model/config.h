@@ -69,9 +69,12 @@ struct ModelConfig {
 
     void print() const;
 
-    // Parse from GGUF metadata key-value pairs
+    // Parse from GGUF metadata key-value pairs.
+    // brandon_layer_map is populated by the loader when it encounters the
+    // brandon.layer_map INT32 array (arrays cannot be stored in the scalar kv map).
     void from_gguf_metadata(
-        const std::unordered_map<std::string, std::variant<int, float, std::string, bool>>& kv);
+        const std::unordered_map<std::string, std::variant<int, float, std::string, bool>>& kv,
+        std::vector<int> brandon_layer_map = {});
 
     BrandonConfig brandon;
 };
