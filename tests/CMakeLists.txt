@@ -26,6 +26,7 @@ ter_add_test(test_executor_simd)
 ter_add_test(test_assembler_simd)
 ter_add_test(test_numfmt_metadata)
 ter_add_test(test_numfmt_quantize)
+ter_add_test(test_numfmt_roundtrip)
 
 add_test(NAME gen_matmul_data
     COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
