@@ -53,6 +53,42 @@ void Sim::run_one(const Instr& i) {
             mem_.store_word(static_cast<size_t>(addr), val);
             break;
         }
+        case Opcode::TJUMP:
+            regs_.set_pc(Word27::from_int(i.imm));
+            break;
+        case Opcode::TBEQ: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            if (a == b) regs_.set_pc(Word27::from_int(i.imm));
+            break;
+        }
+        case Opcode::TBNE: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            if (!(a == b)) regs_.set_pc(Word27::from_int(i.imm));
+            break;
+        }
+        case Opcode::TBLT: {
+            auto a = regs_.read_scalar(i.src1);
+            auto b = regs_.read_scalar(i.src2);
+            if (sign_trit(a - b) == T_NEG) regs_.set_pc(Word27::from_int(i.imm));
+            break;
+        }
+        case Opcode::TCALL: {
+            auto sp_w = regs_.read_scalar(26);
+            auto sp   = sp_w.to_int();
+            mem_.store_word(static_cast<size_t>(sp), regs_.pc());
+            regs_.write_scalar(26, Word27::from_int(sp + 1));
+            regs_.set_pc(Word27::from_int(i.imm));
+            break;
+        }
+        case Opcode::TRET: {
+            auto sp_w = regs_.read_scalar(26);
+            auto sp   = sp_w.to_int() - 1;
+            regs_.write_scalar(26, Word27::from_int(sp));
+            regs_.set_pc(mem_.load_word(static_cast<size_t>(sp)));
+            break;
+        }
         default:
             throw IllegalOpcode("Sim::run_one: opcode not yet implemented");
     }
