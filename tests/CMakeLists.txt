@@ -28,6 +28,7 @@ ter_add_test(test_numfmt_metadata)
 ter_add_test(test_numfmt_quantize)
 ter_add_test(test_numfmt_roundtrip)
 ter_add_test(test_call_kernel)
+ter_add_test(test_load_lut)
 
 ter_add_test(test_kernel_matmul_b_small)
 target_compile_definitions(test_kernel_matmul_b_small PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")

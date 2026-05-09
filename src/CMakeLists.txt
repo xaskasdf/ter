@@ -7,6 +7,7 @@ target_sources(ter PRIVATE
     sim/run_one.cpp
     sim/sim.cpp
     sim/call_kernel.cpp
+    sim/load_lut.cpp
     isa/encode.cpp
     isa/decode.cpp
     asm/lexer.cpp

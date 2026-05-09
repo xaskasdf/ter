@@ -25,6 +25,8 @@ public:
     int64_t call_kernel(class KernelTable& kt, struct KernelId id,
                         const std::vector<int64_t>& args);
 
+    void load_lut(size_t addr, const std::vector<int>& values);
+
 private:
     void run_one(const Instr& i);
 
