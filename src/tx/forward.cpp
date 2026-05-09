@@ -85,6 +85,7 @@ void forward_layer(
     Sim& sim,
     KernelTable& kt,
     const LayerWeights& L,
+    KVCache& cache,
     const std::vector<float>& hidden_in,
     int pos,
     int hidden_size,
@@ -113,7 +114,7 @@ void forward_layer(
     mm_row(sim, kt, id_mm, xt, 0, L.Wk, hidden_size, kv_dim, k);
     mm_row(sim, kt, id_mm, xt, 0, L.Wv, hidden_size, kv_dim, v);
 
-    // 3) Apply RoPE to Q and K per head
+    // 3) Apply RoPE to Q and K per head (before caching K — per Llama spec)
     for (int h = 0; h < n_heads; ++h) {
         std::vector<float> qh(q.begin() + h * head_dim,
                               q.begin() + (h + 1) * head_dim);
@@ -127,9 +128,51 @@ void forward_layer(
         std::copy(kh.begin(), kh.end(), k.begin() + h * head_dim);
     }
 
-    // 4) Trivial single-token attention: softmax of one element is 1.0, so
-    //    ctx = V directly.  (Multi-token + KV cache lands in F5.3.)
-    std::vector<float> ctx = v;  // same shape as v (kv_dim)
+    // 3.5) Write post-RoPE K and V into the cache at position `pos`.
+    for (int i = 0; i < kv_dim; ++i) {
+        cache.K[static_cast<size_t>(pos) * kv_dim + i] = k[i];
+        cache.V[static_cast<size_t>(pos) * kv_dim + i] = v[i];
+    }
+
+    // 4) Causal multi-token attention over cache[0..pos] (inclusive).
+    //    For each query head h, compute scores against all cached K positions,
+    //    softmax, then weighted sum over cached V (with GQA support).
+    const int gqa_group = n_heads / n_kv_heads;   // 1 if not GQA
+    const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+    std::vector<float> ctx(q_dim, 0.0f);
+    for (int h = 0; h < n_heads; ++h) {
+        const int kv_h = h / gqa_group;
+        const float* qh = q.data() + h * head_dim;
+
+        // scores[t] = Q[h] · K_cache[t][kv_h] / sqrt(head_dim) for t in [0, pos]
+        std::vector<float> scores(pos + 1, 0.0f);
+        for (int t = 0; t <= pos; ++t) {
+            const float* kh = cache.K.data()
+                              + static_cast<size_t>(t) * kv_dim
+                              + static_cast<size_t>(kv_h) * head_dim;
+            double acc = 0.0;
+            for (int d = 0; d < head_dim; ++d)
+                acc += double(qh[d]) * double(kh[d]);
+            scores[t] = static_cast<float>(acc) * inv_sqrt_d;
+        }
+
+        // Softmax over scores[0..pos]
+        float mx = *std::max_element(scores.begin(), scores.end());
+        double sum = 0.0;
+        for (auto& s : scores) { s = std::exp(s - mx); sum += s; }
+        for (auto& s : scores) s = static_cast<float>(s / sum);
+
+        // Weighted sum over V_cache[0..pos][kv_h]
+        float* out_h = ctx.data() + h * head_dim;
+        for (int t = 0; t <= pos; ++t) {
+            const float* vh = cache.V.data()
+                              + static_cast<size_t>(t) * kv_dim
+                              + static_cast<size_t>(kv_h) * head_dim;
+            for (int d = 0; d < head_dim; ++d)
+                out_h[d] += scores[t] * vh[d];
+        }
+    }
 
     // 5) Wo projection: attn_out = ctx @ Wo
     TritTensor ctxt = quantize(ctx.data(), {1, q_dim}, 9);

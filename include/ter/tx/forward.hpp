@@ -26,6 +26,7 @@ void forward_layer(
     Sim& sim,
     KernelTable& kt,
     const LayerWeights& L,
+    KVCache& cache,                          // in/out per-layer KV state
     const std::vector<float>& hidden_in,
     int pos,
     int hidden_size,
