@@ -75,6 +75,23 @@ For matmul: `M * N * ceil(K / 27)` `tvmac`s, `M * N * ceil(K / 27)` `tvsum`s, `M
 
 Keep this file up to date as new patterns emerge.
 
+## Lessons from `tk_rope` (host-prepared inputs + wide-clamp consistency)
+
+### Host-prepared inputs unlock pure SIMD
+RoPE's pair-rotation `(x[2k], x[2k+1]) → (x[2k]*c - x[2k+1]*s, x[2k]*s + x[2k+1]*c)` would need lane-shuffle and pair-negate opcodes to compute in-kernel. Building `cos_vec`, `sin_vec`, and `rotated_x` on the host ahead of `call_kernel` reduces the kernel to 8 instructions: `4 tvload + 2 tvmul + 1 tvadd + 1 tvstore`. Counter signature is exact and the kernel is trivially auditable.
+
+This joins **host-orchestrated tiling** (matmul) and **host-side scale recovery** (every kernel) as the third architectural separation between kernel and host.
+
+### Wide-clamp consistency across all SIMD ops
+Originally `Vec::set_lane` clamped to `±9841` (the 9-trit lane limit) and `set_lane_wide` clamped to int32 (added in F4.6.3 for `TVMUL` so products like `9841² ≈ 9.7e7` wouldn't saturate). This left `TVADD`, `TVSUB`, `TVNEG` still using the narrow clamp — fine in isolation but **catastrophic when chained after `TVMUL`** (RoPE: `tvadd v6, v4, v5` where v4 and v5 are `tvmul` outputs).
+
+The unified semantic (post-fix): **all SIMD ops use `set_lane_wide`**, which clamps at int32 boundary. The "9-trit per lane" guarantee applies to memory boundaries (loads from `Word27` in memory) and the per-tensor scale recovery on the host, not to in-register intermediates.
+
+**Implication for new kernels:** intermediates can grow up to int32 (~2.1e9). Sums of two `tvmul` products (≈ `2 × 9841² ≈ 1.94e8`) fit comfortably. Triples (`9841³ ≈ 9.5e11`) still overflow — the SwiGLU/SiLU split-at-host pattern is still required.
+
+### When the recovery formula is "trivial"
+For pure-linear kernels (only multiplies and adds on quantized inputs and pre-scaled coefficients), the recovery formula is just the product of the input scales divided by the coefficient's `OUT_SCALE`. RoPE: `recovery = xt.scale / OUT_SCALE`. No exp/rcp/rsqrt cancellations. This is the simplest possible recovery and a good signal that a kernel is well-shaped.
+
 ## Lessons from `tk_silu` (memory-aliasing bug)
 
 ### Reserve the low memory range for kernel code
