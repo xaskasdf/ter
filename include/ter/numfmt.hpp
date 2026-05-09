@@ -37,4 +37,6 @@ TritTensor quantize(const float* data,
                     const std::vector<int>& shape,
                     int n_trits_per_elem = 9);
 
+void dequantize(const TritTensor& t, float* out);
+
 }
