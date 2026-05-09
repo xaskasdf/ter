@@ -1,0 +1,10 @@
+        ; Demo: load two 27-element vectors from memory, add them, store the result.
+        ; A real matmul kernel-program is part of F4 (transformer kernels).
+        tloadi r1, 100
+        tloadi r2, 200
+        tloadi r3, 300
+        tvload v0, r1
+        tvload v1, r2
+        tvadd  v2, v0, v1
+        tvstore v2, r3
+        thalt

@@ -24,3 +24,15 @@ ter_add_test(test_sim_smoke)
 ter_add_test(test_vec)
 ter_add_test(test_executor_simd)
 ter_add_test(test_assembler_simd)
+
+add_test(NAME gen_matmul_data
+    COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
+            ${CMAKE_SOURCE_DIR}/tools/matmul_reference.py
+            --out-dir ${CMAKE_BINARY_DIR}/matmul_data
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(gen_matmul_data PROPERTIES FIXTURES_SETUP matmul_data)
+
+ter_add_test(test_matmul_reference)
+set_tests_properties(test_matmul_reference PROPERTIES
+    FIXTURES_REQUIRED matmul_data
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
