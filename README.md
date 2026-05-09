@@ -26,9 +26,11 @@ to recreate it).
 - [x] F5.4a — Load brandon-tiny f16 GGUF + quantize one tensor (token_embd, MSE 2.4e-10) through Format B.
 - [x] F5.4b — GGUF parser recognises all 15 `brandon.*` keys; BrandonConfig populates correctly (block_count=12, compute_layer_count=24, n_registers=4, layer_map[24], use_dwa, use_value_residual, weight_tying).
 - [x] F5.4c — Brandon SPM tokenizer working: vocab=8192, ChatML `<|im_start|>=4 <|im_end|>=5` resolved by string search, encode/decode round-trip on "hello world" returns 3 tokens. Auto-detect SPM-vs-GPT2 worked.
-- [ ] F5.4d — Tile-aware rmsnorm/softmax for hidden_size > 27 (brandon dim=256 needs ~10 tiles).
-- [ ] F5.4e — Multi-layer Transformer + brandon-specific bits (value_residual, DWA, register prefill); first generated token.
-- [ ] F5.4f — TinyStories Q4_K_M (test the unpacker for tinier validation runs).
+- [x] F5.4d — Host-side fallbacks for rmsnorm/rope/softmax/silu when N>27. forward_layer at brandon shapes (dim=256, HD=32, I=720) produces finite output, 27712 TVMACs per layer, 0.63s wall.
+- [x] F5.4e — BrandonTransformer assembly + first forward_token through 24 layers on the ternary substrate. 665,088 TVMACs/token, 13s wall, finite logits, valid argmax. Brandon-specific bits (value_residual, DWA, register prefill) DEFERRED — output is structurally correct, semantically garbage.
+- [ ] F5.4f — Brandon-specific forward bits (register prefill, value_residual, DWA mixing) per integration guide Step 4. After this, greedy output should be non-empty.
+- [ ] F5.4g — Sampling recipe (temp 0.7 + rep_penalty 1.2 + no_repeat_ngram=3) + ChatML template. After this, "Who was Einstein?" should produce fluent English per guide Step 8.
+- [ ] F5.4h — TinyStories Q4_K_M (test the unpacker for tinier validation runs).
 - [ ] F6 — Llama 3.2 1B Q8_0 end-to-end (paper target).
 
 ## Building blocks (F0-F4 complete)
