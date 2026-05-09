@@ -160,3 +160,29 @@ Originally `Vec::set_lane` clamped to `±9841` (the 9-trit per-lane range). For 
 ### Recovery formula clarity
 
 For RMSNorm, the recovery scale that converts the kernel's int output back to float is `rsq_max / (OUT_SCALE * mti)` (NOT `xt.scale * rsq_max / OUT_SCALE` as initially documented). Each LUT-based kernel needs its recovery formula derived explicitly and tested. Document it in the kernel's source comment.
+
+## F4 Complete — Architectural Summary
+
+After 5 implemented kernels and one host-composed attention pipeline, three architectural seams have proven essential:
+
+1. **Host orchestrates tiling.** Long matmuls split into 27-length chunks; the host loops, the kernel does one tile.
+2. **Host applies scale recovery.** All in-kernel arithmetic is integer ternary; per-tensor scales live on the host and apply at boundaries.
+3. **Host prepares non-uniform inputs.** Pair-shuffles, broadcast vectors, and any structure the SIMD ISA can't easily produce live in host code that runs once before the kernel call.
+
+Composition (e.g., attention) is just kernel calls in sequence. No "mega-kernel" was needed for any transformer op. Total kernel count: 5 mechanical kernels + 1 attention orchestration pattern.
+
+### Counter taxonomy
+- `tk_matmul_b_9t`: 1 TVMAC, 1 TVSUM, 1 TSTORE per tile
+- `tk_rmsnorm`: 1 TVMAC + 1 TVSUM + 1 TVMUL + ~30 TLOAD per call (per-lane broadcast loop)
+- `tk_softmax`: 1 TVMUL + 2 TVLOAD + 1 TVSTORE + ~55 TLOAD per call (per-lane exp loop)
+- `tk_silu`: 1 TVMUL + 2 TVLOAD + 1 TVSTORE + ~54 TLOAD per call (per-lane sigmoid loop)
+- `tk_rope`: 4 TVLOAD + 2 TVMUL + 1 TVADD + 1 TVSTORE per call (pure SIMD)
+
+The total TVMAC count for a single attention pass is the headline metric for the project's thesis: a count we can compare against an equivalent fp16 multiply count.
+
+### What we'd build next if continuing F4
+- `tk_attn_score` as a single sim-resident composition kernel (would use `tcall` to chain other kernels' entry points). Currently this lives in host code; making it sim-resident would close the K3 → K2 migration.
+- `TVEXTRACT/TVINSERT/TVGATHER` opcodes to SIMD-ify the per-lane LUT loops in softmax/silu.
+- `TVCLEAR` opcode to explicitly zero an accumulator (currently relied on `call_kernel` reset).
+
+These are quality-of-life improvements; the core thesis is provable as-is.

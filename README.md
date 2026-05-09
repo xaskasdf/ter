@@ -18,10 +18,20 @@ to recreate it).
 - [x] F1 — Scalar ISA, assembler, simulator, sum(1..5) smoke test.
 - [x] F2 — SIMD extension (tvadd, tvmac, tvsum, ...), 64x64 matmul gate.
 - [x] F3 — Format B quantizer (bf16/float ↔ fixed-point trit + per-tensor scale).
-- [x] F4 (matmul + rmsnorm + softmax + silu + rope) — Sim::call_kernel, KernelTable, 5 kernels, TVMUL opcode, jump relocation, exp + recip + rsqrt + sigmoid LUTs, full SwiGLU + RoPE via host-prepared inputs.
-- [ ] F4 (rest) — attention.
+- [x] F4 — All kernels (matmul, rmsnorm, softmax, silu, rope) + attention via host-orchestrated composition; complete K3 transformer building blocks.
 - [ ] F5 — ntransformer bridge.
 - [ ] F6 — Llama 3.2 1B end-to-end.
+
+## Building blocks (F0-F4 complete)
+
+| Component | Purpose | File |
+|---|---|---|
+| `tk_matmul_b_9t` | 27-length integer dot product (one tile of GEMM) | `src/kernels/tk_matmul_b_9t.tasm` |
+| `tk_rmsnorm` | RMSNorm via rsqrt LUT | `src/kernels/tk_rmsnorm.tasm` |
+| `tk_softmax` | Softmax via per-lane exp LUT + recip | `src/kernels/tk_softmax.tasm` |
+| `tk_silu` | SiLU(x) = x · sigmoid(x); SwiGLU via host composition | `src/kernels/tk_silu.tasm` |
+| `tk_rope` | Pure-SIMD paired rotation (host-prepared inputs) | `src/kernels/tk_rope.tasm` |
+| Attention | Single-head Q/K/V + RoPE + scores + softmax + out, via host composition | `tests/test_attention.cpp` |
 
 See `docs/superpowers/specs/2026-05-08-ter-design.md` for the design.
 See `docs/superpowers/plans/` for the implementation plans.
