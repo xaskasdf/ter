@@ -17,4 +17,5 @@ target_sources(ter PRIVATE
     kernels/registry.cpp
     tx/layer.cpp
     tx/forward.cpp
+    tx/lut_setup.cpp
 )
