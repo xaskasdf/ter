@@ -24,6 +24,7 @@ ter_add_test(test_sim_smoke)
 ter_add_test(test_vec)
 ter_add_test(test_executor_simd)
 ter_add_test(test_assembler_simd)
+ter_add_test(test_numfmt_metadata)
 
 add_test(NAME gen_matmul_data
     COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
