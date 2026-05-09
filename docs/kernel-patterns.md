@@ -75,6 +75,29 @@ For matmul: `M * N * ceil(K / 27)` `tvmac`s, `M * N * ceil(K / 27)` `tvsum`s, `M
 
 Keep this file up to date as new patterns emerge.
 
+## Lessons from `tk_silu` (memory-aliasing bug)
+
+### Reserve the low memory range for kernel code
+Without a memory-map convention, tests put data at convenient round addresses (100, 200, 300...) which silently overlap with kernel code installed by `KernelTable::install`. With 4 installed kernels totaling ~120 instructions, code occupies addresses 0–120; data at addr 100 overwrites the tail of the last installed kernel; subsequent kernel calls execute garbage and either loop forever or trigger memory faults from corrupted load addresses.
+
+**Convention (effective immediately):** reserve addresses `[0, 511]` for kernel code (gives ~5 kernels worth of headroom). Data, scratch, and LUTs go at `>= 512`. The convention numbers in current tests:
+- code: `0..511`
+- data inputs: `>= 512` (most tests use 1000+)
+- LUTs: `>= 4096` (one LUT-aligned region per LUT)
+- scratch (kernel-internal): `700..899` (this region is below the new convention floor — needs to move to `>= 4096` in any new kernel; existing kernels keep `700` for now and will be migrated when the next bug appears)
+
+The robust fix is a host-side memory allocator that hands out non-overlapping regions; for now the convention is enforced by code review and tests use addresses `>= 1000`.
+
+### When tests fail with `Memory::load_word out_of_range`, suspect aliasing first
+The failure mode is sneaky: the kernel runs, decoded `tvload v0, r1` reads bytes from a corrupted instruction word as a "vector address," and the result is a huge garbage address that throws `out_of_range`. Stack trace points at the load, not the corruption site. Always verify data addresses are above the kernel-code high-water mark before debugging the kernel itself.
+
+### Counter pattern for composed-kernel tests
+For SwiGLU we wrote two TEST_CASEs:
+1. `tk_silu` direct vs numpy `silu(gate)` — verifies the kernel.
+2. Full SwiGLU = `silu(gate) * up` via kernel + host `tvmul` — verifies the composition.
+
+Both passing means the composition pattern is correct AND the kernel is correct. Either failing isolates the bug.
+
 ## Lessons from `tk_softmax` (per-lane LUT lookup + recovery math)
 
 ### Per-lane lookup is unavoidable without lane extract/insert opcodes
