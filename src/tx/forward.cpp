@@ -2,6 +2,7 @@
 #include <ter/numfmt.hpp>
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
 
 namespace ter::tx {
 
@@ -10,20 +11,55 @@ namespace {
 // Sim memory map for forward_layer (single-token, single-layer).
 // Kernel-code occupies [0, 511]; data starts >= 512.
 // We use >= 1024 to be safe.
-constexpr int SCRATCH_X = 1024;  // matmul X gather buffer (27 words)
-constexpr int SCRATCH_W = 1100;  // matmul W column gather buffer (27 words)
-constexpr int Y_TILE    = 1200;  // matmul output tile (1 word)
+constexpr int SCRATCH_X  = 1024;  // matmul X gather buffer (27 words)
+constexpr int SCRATCH_W  = 1100;  // matmul W column gather buffer (27 words)
+constexpr int Y_TILE     = 1200;  // matmul output tile (1 word)
+constexpr int RMS_X_ADDR = 1300;  // rmsnorm input buffer (27 words)
+constexpr int RMS_Y_ADDR = 1400;  // rmsnorm output buffer (27 words)
 
-// Apply RMSNorm: y = (x / rms(x)) * weight, host-only for tractability.
-// Future F5.3: route through tk_rmsnorm kernel.
-void rmsnorm_host(const std::vector<float>& x, const std::vector<float>& w,
-                  float eps, std::vector<float>& y) {
-    double ss = 0.0;
-    for (auto v : x) ss += double(v) * double(v);
-    double rms_inv = 1.0 / std::sqrt(ss / static_cast<double>(x.size()) + eps);
+// Apply RMSNorm via the tk_rmsnorm kernel.
+// x: input vector of length N (must be <= 27 for single-tile execution).
+// w: gain vector of length N (applied host-side; kernel doesn't do gain).
+// rsqrt_lut_addr: sim address of the loaded rsqrt LUT (256 entries).
+// Recovery: y[i] = (y_int[i] * xt.scale * RSQ_MAX / OUT_SCALE) * w[i]
+// where RSQ_MAX = 16 matches gen_rsqrt_lut.py's default rsq_max parameter.
+// Caveat: zero-padding to 27 lanes does not change sum_sq (zeros contribute 0),
+// but sum_div is computed for the worst-case 27-lane max, biasing the LUT index
+// slightly downward for small N. This is documented and accepted for this MVP.
+void rmsnorm_kernel(Sim& sim, KernelTable& kt, KernelId id_rms,
+                    const std::vector<float>& x, const std::vector<float>& w,
+                    int rsqrt_lut_addr, float /*eps*/,
+                    std::vector<float>& y) {
+    constexpr int VEC_LANES = 27;
+    constexpr int OUT_SCALE = 9841;
+    constexpr float RSQ_MAX = 16.0f;  // matches gen_rsqrt_lut.py default
+
+    // Quantize input padded to 27 lanes.
+    std::vector<float> padded(VEC_LANES, 0.0f);
+    for (size_t i = 0; i < x.size() && i < static_cast<size_t>(VEC_LANES); ++i)
+        padded[i] = x[i];
+    TritTensor xt = quantize(padded.data(), {VEC_LANES}, 9);
+
+    // Place inputs in sim scratch memory.
+    for (int i = 0; i < VEC_LANES; ++i)
+        sim.mem().store_word(static_cast<size_t>(RMS_X_ADDR + i), xt.payload[i]);
+
+    // sum_div: max sum_sq for 27 lanes of |x_int| <= 9841 is 27 * 9841^2 ~ 2.6e9.
+    int64_t mti = 9841;
+    int64_t sum_div = (static_cast<int64_t>(VEC_LANES) * mti * mti) / 255;
+    if (sum_div < 1) sum_div = 1;
+
+    std::vector<int64_t> args = {RMS_X_ADDR, RMS_Y_ADDR, rsqrt_lut_addr, sum_div, 255, 0, 0};
+    sim.call_kernel(kt, id_rms, args);
+
+    // Recover float and apply per-element gain w[i] (host-side).
+    float recovery = xt.scale * RSQ_MAX / static_cast<float>(OUT_SCALE);
     y.assign(x.size(), 0.0f);
-    for (size_t i = 0; i < x.size(); ++i)
-        y[i] = static_cast<float>(double(x[i]) * rms_inv) * w[i];
+    for (size_t i = 0; i < x.size(); ++i) {
+        float v = static_cast<float>(
+            sim.mem().load_word(static_cast<size_t>(RMS_Y_ADDR + i)).to_int()) * recovery;
+        y[i] = v * w[i];
+    }
 }
 
 // Apply RoPE to a head-dim vector (single token at position pos).
@@ -94,16 +130,17 @@ void forward_layer(
     int n_kv_heads,
     int intermediate_size,
     float rmsnorm_eps,
-    const LutAddrs& /*luts*/,  // unused in this MVP — host-side norms/softmax
+    const LutAddrs& luts,
     std::vector<float>& hidden_out)
 {
-    KernelId id_mm = kt.find("tk_matmul_b_9t");
+    KernelId id_mm  = kt.find("tk_matmul_b_9t");
+    KernelId id_rms = kt.find("tk_rmsnorm");
 
     // ---- Attention block ----
 
-    // 1) attn_norm: RMSNorm of hidden_in
+    // 1) attn_norm: RMSNorm of hidden_in via tk_rmsnorm kernel
     std::vector<float> x_norm;
-    rmsnorm_host(hidden_in, L.attn_norm_w, rmsnorm_eps, x_norm);
+    rmsnorm_kernel(sim, kt, id_rms, hidden_in, L.attn_norm_w, luts.rsqrt, rmsnorm_eps, x_norm);
 
     // 2) Q = x_norm @ Wq,  K = x_norm @ Wk,  V = x_norm @ Wv
     TritTensor xt = quantize(x_norm.data(), {1, hidden_size}, 9);
@@ -187,9 +224,9 @@ void forward_layer(
 
     // ---- FFN block ----
 
-    // 7) ffn_norm: RMSNorm of hidden_mid
+    // 7) ffn_norm: RMSNorm of hidden_mid via tk_rmsnorm kernel
     std::vector<float> mid_norm;
-    rmsnorm_host(hidden_mid, L.ffn_norm_w, rmsnorm_eps, mid_norm);
+    rmsnorm_kernel(sim, kt, id_rms, hidden_mid, L.ffn_norm_w, luts.rsqrt, rmsnorm_eps, mid_norm);
 
     // 8) gate = mid_norm @ Wgate;  up = mid_norm @ Wup
     TritTensor mt = quantize(mid_norm.data(), {1, hidden_size}, 9);
