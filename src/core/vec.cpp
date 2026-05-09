@@ -21,12 +21,14 @@ Vec vec_neg(const Vec& a) noexcept {
 }
 
 Vec vec_mul(const Vec& a, const Vec& b) noexcept {
+    // Lane-wise integer multiply.  Uses set_lane_wide so that scaled
+    // fixed-point products (e.g. from the rsqrt LUT in tk_rmsnorm) are stored
+    // without premature saturation at kLaneMax.  The caller is responsible for
+    // applying a recovery scale to bring values back into the normal range.
     Vec r;
     for (int i = 0; i < Vec::kLanes; ++i) {
         int64_t prod = int64_t{a.lane(i)} * int64_t{b.lane(i)};
-        if (prod > Vec::kLaneMax) prod = Vec::kLaneMax;
-        if (prod < Vec::kLaneMin) prod = Vec::kLaneMin;
-        r.set_lane(i, static_cast<int32_t>(prod));
+        r.set_lane_wide(i, prod);
     }
     return r;
 }

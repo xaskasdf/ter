@@ -58,3 +58,16 @@ target_compile_definitions(test_kernel_matmul_b_32 PRIVATE TER_KERNELS_DIR="${CM
 set_tests_properties(test_kernel_matmul_b_32 PROPERTIES
     FIXTURES_REQUIRED matmul_b_data
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+
+add_test(NAME gen_rsqrt_lut
+    COMMAND ${CMAKE_SOURCE_DIR}/.venv/bin/python
+            ${CMAKE_SOURCE_DIR}/tools/gen_rsqrt_lut.py
+            --out-dir ${CMAKE_BINARY_DIR}/lut_data
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(gen_rsqrt_lut PROPERTIES FIXTURES_SETUP rsqrt_lut)
+
+ter_add_test(test_kernel_rmsnorm)
+target_compile_definitions(test_kernel_rmsnorm PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_kernel_rmsnorm PROPERTIES
+    FIXTURES_REQUIRED rsqrt_lut
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})

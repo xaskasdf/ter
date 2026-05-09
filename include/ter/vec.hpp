@@ -15,6 +15,15 @@ public:
     constexpr void set_lane(int i, int v) noexcept {
         lanes_[i] = v < kLaneMin ? kLaneMin : v > kLaneMax ? kLaneMax : v;
     }
+    // set_lane_wide: store without clamping to kLaneMax.  Used by TVMUL which
+    // produces scaled fixed-point products that legitimately exceed kLaneMax
+    // before the caller applies a recovery scale.  Values are clamped only at
+    // the int32_t boundary.
+    void set_lane_wide(int i, int64_t v) noexcept {
+        if (v > INT32_MAX) v = INT32_MAX;
+        if (v < INT32_MIN) v = INT32_MIN;
+        lanes_[i] = static_cast<int32_t>(v);
+    }
 
 private:
     std::array<int32_t, kLanes> lanes_{};
