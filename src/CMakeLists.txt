@@ -7,4 +7,6 @@ target_sources(ter PRIVATE
     sim/sim.cpp
     isa/encode.cpp
     isa/decode.cpp
+    asm/lexer.cpp
+    asm/emitter.cpp
 )
