@@ -20,7 +20,14 @@ FetchContent_Declare(doctest
 FetchContent_MakeAvailable(doctest)
 
 add_library(ter)
-target_compile_options(ter PRIVATE -Wall -Wextra -Wpedantic -Werror)
+# -O3 + AVX2/FMA on the ter library only (tests stay at default Debug). The
+# inner GEMV in src/tx/forward.cpp::mm_row is now structured for compiler
+# auto-vectorization; -O3 turns the int32*int64 inner loop into vpmuldq +
+# vpaddq sequences. AVX-512 not required (i9-9880H lacks it; AVX2 + FMA is
+# universal on x86_64 since Haswell 2013).
+target_compile_options(ter PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+    -O3 -mavx2 -mfma)
 target_include_directories(ter PUBLIC ${CMAKE_SOURCE_DIR}/include)
 add_subdirectory(src)
 add_subdirectory(vendor/ntransformer)
