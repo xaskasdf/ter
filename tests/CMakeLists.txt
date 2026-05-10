@@ -212,6 +212,10 @@ set_tests_properties(test_tinystories_smoke PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     TIMEOUT 600)
 
+ter_add_test(test_bitnet_post_quant)
+target_link_libraries(test_bitnet_post_quant PRIVATE nt_infra)
+set_tests_properties(test_bitnet_post_quant PROPERTIES TIMEOUT 60)
+
 ter_add_test(test_format_a_vs_b)
 target_link_libraries(test_format_a_vs_b PRIVATE nt_infra)
 target_compile_definitions(test_format_a_vs_b PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
