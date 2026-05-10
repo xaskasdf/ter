@@ -37,14 +37,14 @@ struct Run {
     std::vector<float> logits;
 };
 
-Run run_one(bool format_a, int bos) {
+Run run_one(bool format_a, int mant_trits, int bos) {
     using namespace ter;
     using namespace ter::tx;
 
     nt::GGUFLoader loader;
     REQUIRE(loader.load(GGUF_PATH));
     BrandonTransformer tx = load_llama_transformer(loader, /*max_seq=*/8,
-                                                   /*n_trits=*/9, format_a);
+                                                   /*n_trits=*/9, format_a, mant_trits);
 
     Sim s(64 * 1024);
     KernelTable kt;
@@ -67,35 +67,43 @@ TEST_CASE("Format A vs B: TinyStories argmax + RMSE comparison") {
 
     int bos = 1;  // TinyStories tokenizer BOS
 
-    auto rb = run_one(/*format_a=*/false, bos);
-    auto ra = run_one(/*format_a=*/true,  bos);
+    auto rb    = run_one(/*format_a=*/false, /*mant_trits=*/9, bos);  // baseline
+    auto ra15  = run_one(/*format_a=*/true,  /*mant_trits=*/9, bos);  // 1+5+9 = 15 trits
+    auto ra11  = run_one(/*format_a=*/true,  /*mant_trits=*/5, bos);  // 1+5+5 = 11 trits
+    auto ra7   = run_one(/*format_a=*/true,  /*mant_trits=*/1, bos);  // 1+5+1 = 7 trits (extreme)
 
-    REQUIRE(rb.logits.size() == ra.logits.size());
+    REQUIRE(rb.logits.size() == ra15.logits.size());
 
-    double sum_sq = 0.0;
-    double sum_abs = 0.0;
-    for (size_t i = 0; i < rb.logits.size(); ++i) {
-        double d = static_cast<double>(rb.logits[i]) - static_cast<double>(ra.logits[i]);
-        sum_sq  += d * d;
-        sum_abs += std::fabs(d);
-    }
-    double rmse = std::sqrt(sum_sq / static_cast<double>(rb.logits.size()));
-    double mae  = sum_abs / static_cast<double>(rb.logits.size());
+    auto rmse = [&](const Run& a, const Run& b) {
+        double s = 0.0;
+        for (size_t i = 0; i < a.logits.size(); ++i) {
+            double d = a.logits[i] - b.logits[i];
+            s += d * d;
+        }
+        return std::sqrt(s / static_cast<double>(a.logits.size()));
+    };
 
     std::fprintf(stderr,
-        "\n=== Format A vs B (TinyStories, BOS=%d) ===\n"
-        "  Format B argmax = %d (logit %.4f)\n"
-        "  Format A argmax = %d (logit %.4f)\n"
-        "  argmax match    = %s\n"
-        "  logit RMSE      = %.6f\n"
-        "  logit MAE       = %.6f\n"
-        "  trit cost       = B:9 trits/elem  vs  A:15 trits/elem (1+5+9)\n",
-        bos, rb.argmax_id, rb.argmax_logit, ra.argmax_id, ra.argmax_logit,
-        rb.argmax_id == ra.argmax_id ? "YES" : "NO",
-        rmse, mae);
+        "\n=== Format A trit-budget sweep vs Format B baseline (TinyStories) ===\n"
+        "                       argmax  top-logit  vs-B-RMSE   trits/elem\n"
+        "  Format B 9-trit    : %6d  %9.4f  --------    9\n"
+        "  Format A 15-trit   : %6d  %9.4f  %.6f   15  (1+5+9)\n"
+        "  Format A 11-trit   : %6d  %9.4f  %.6f   11  (1+5+5)\n"
+        "  Format A  7-trit   : %6d  %9.4f  %.6f    7  (1+5+1)\n",
+        rb.argmax_id, rb.argmax_logit,
+        ra15.argmax_id, ra15.argmax_logit, rmse(rb, ra15),
+        ra11.argmax_id, ra11.argmax_logit, rmse(rb, ra11),
+        ra7.argmax_id,  ra7.argmax_logit,  rmse(rb, ra7));
 
-    // Format A is wider (15 trits) and should preserve at minimum the same
-    // top token as Format B (9 trits). Tight RMSE bound is the real claim.
-    CHECK(rb.argmax_id == ra.argmax_id);
-    CHECK(rmse < 0.5);   // logit-space delta should be small
+    // 15-trit A is much wider than 9-trit B; should match argmax exactly.
+    CHECK(ra15.argmax_id == rb.argmax_id);
+    CHECK(rmse(rb, ra15) < 0.01);
+
+    // 11-trit A: H2 hypothesis says fewer total trits than 9-trit B (it's MORE
+    // trits, but the win point is the encoded dynamic range, not the count).
+    // Under TinyStories' modest precision needs we expect argmax preservation.
+    CHECK(ra11.argmax_id == rb.argmax_id);
+
+    // 7-trit A: stress test. Argmax MAY drift; just check the run completes.
+    CHECK(ra7.argmax_id >= 0);
 }

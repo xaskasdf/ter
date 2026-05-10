@@ -71,5 +71,6 @@ TEST_CASE("Llama 3.2 1B: greedy multi-token generation from BOS") {
     dump_op_stats(s, "Llama 3.2 1B, 1 + N_GEN forwards",
                   tx.hidden_size, tx.intermediate_size,
                   tx.n_heads, tx.n_kv_heads, tx.head_dim,
-                  tx.n_layers, tx.vocab_size);
+                  tx.n_layers, tx.vocab_size,
+                  /*n_forwards=*/1 + N_GEN);
 }

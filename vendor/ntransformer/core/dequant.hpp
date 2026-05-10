@@ -26,6 +26,15 @@ void dequant_q8_0(const void* src, std::size_t n_elems, float* out);
 // n_elems must be a multiple of 256.
 void dequant_q6_k(const void* src, std::size_t n_elems, float* out);
 
+// I2_S block dequant -- microsoft/BitNet's b1.58 ternary weight format.
+// 2-bit packed weights, 4 weights per byte (no per-block scale embedded;
+// per-tensor scale is absorbed by the downstream attn_sub_norm/ffn_sub_norm
+// per the BitNet b1.58 paper sec 3.2). Mapping: 0->0, 1->+1, 2->-1, 3->0.
+// Output values are exactly in {-1, 0, +1}; multiply by an external scale at
+// the caller for the actual weight magnitude.
+// n_elems must be a multiple of 4. Caller is responsible for the scale.
+void dequant_i2_s(const void* src, std::size_t n_elems, float* out);
+
 // Q4_K_M block dequant. ggml format (block_q4_K, 144 bytes / 256 elements):
 //   ggml_fp16_t d, dmin;          (4 bytes)   super-block scales
 //   uint8_t     scales[12];       (12 bytes)  packed 6-bit (scale,min) for 8 sub-blocks

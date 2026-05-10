@@ -34,6 +34,19 @@ TEST_CASE("dequant_f32 is identity") {
     for (std::size_t i = 0; i < in.size(); ++i) CHECK(out[i] == in[i]);
 }
 
+TEST_CASE("dequant_i2_s on hand-crafted bytes") {
+    // Mapping: 0->0, 1->+1, 2->-1, 3->0
+    // Byte 0x24 = 0b00100100 -> nibbles (LSB pair first): 00 01 10 00
+    //                                                    -> 0, +1, -1, 0
+    // Byte 0xB1 = 0b10110001 -> nibbles: 01 00 11 10
+    //                                  -> +1, 0, 0, -1
+    std::uint8_t bytes[2] = {0x24, 0xB1};
+    float out[8];
+    dequant_i2_s(bytes, 8, out);
+    CHECK(out[0] == 0.0f);  CHECK(out[1] == +1.0f); CHECK(out[2] == -1.0f); CHECK(out[3] == 0.0f);
+    CHECK(out[4] == +1.0f); CHECK(out[5] == 0.0f);  CHECK(out[6] == 0.0f);  CHECK(out[7] == -1.0f);
+}
+
 TEST_CASE("dequant_q6_k on a hand-crafted constant block") {
     // d=1.0, all scales=1, all q nibbles=0 -> elem = 1 * 1 * (0|0 - 32) = -32.
     std::vector<std::uint8_t> blk(210, 0);

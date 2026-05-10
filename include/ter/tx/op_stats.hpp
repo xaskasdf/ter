@@ -86,18 +86,20 @@ inline uint64_t analytical_fp16_macs_per_forward(
 inline void dump_op_stats(const Sim& s, const char* label,
                           int hidden_size, int intermediate_size,
                           int n_heads, int n_kv_heads, int head_dim,
-                          int n_layers, int vocab_size)
+                          int n_layers, int vocab_size,
+                          int n_forwards = 1)
 {
     OpStats x = OpStats::from(s);
-    uint64_t fp16_macs = analytical_fp16_macs_per_forward(
+    uint64_t per_fwd_fp16 = analytical_fp16_macs_per_forward(
         hidden_size, intermediate_size, n_heads, n_kv_heads, head_dim,
         n_layers, vocab_size);
+    uint64_t fp16_macs_total = per_fwd_fp16 * static_cast<uint64_t>(n_forwards);
     uint64_t lane_macs = x.lane_macs();
-    double ratio = fp16_macs == 0 ? 0.0
-                 : static_cast<double>(lane_macs) / static_cast<double>(fp16_macs);
+    double ratio = fp16_macs_total == 0 ? 0.0
+                 : static_cast<double>(lane_macs) / static_cast<double>(fp16_macs_total);
 
     std::fprintf(stderr,
-        "\n=== op-stats: %s ===\n"
+        "\n=== op-stats: %s (n_forwards=%d) ===\n"
         "  total kernel ops : %llu\n"
         "  TVMAC            : %llu  (lane-MACs: %llu = TVMAC*27)\n"
         "  TVADD/TVSUB/TVMUL: %llu / %llu / %llu\n"
@@ -108,8 +110,9 @@ inline void dump_op_stats(const Sim& s, const char* label,
         "  TJUMP/TCALL/Tbr  : %llu / %llu / %llu\n"
         "  -- analytical baseline --\n"
         "  fp16 MACs/forward: %llu  (Q+K+V+O+gate+up+down per layer, +lm_head)\n"
+        "  fp16 MACs total  : %llu  (per-fwd x n_forwards)\n"
         "  lane-MAC : fp16  : %.3f x  (>1 means ternary substrate does more MACs)\n",
-        label,
+        label, n_forwards,
         (unsigned long long)x.total_ops,
         (unsigned long long)x.tvmac, (unsigned long long)lane_macs,
         (unsigned long long)x.tvadd, (unsigned long long)x.tvsub, (unsigned long long)x.tvmul,
@@ -118,7 +121,8 @@ inline void dump_op_stats(const Sim& s, const char* label,
         (unsigned long long)x.tload, (unsigned long long)x.tstore,
         (unsigned long long)x.tadd, (unsigned long long)x.tsub, (unsigned long long)x.tcmp,
         (unsigned long long)x.tjump, (unsigned long long)x.tcall, (unsigned long long)x.tbranch,
-        (unsigned long long)fp16_macs,
+        (unsigned long long)per_fwd_fp16,
+        (unsigned long long)fp16_macs_total,
         ratio);
 }
 

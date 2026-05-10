@@ -111,6 +111,21 @@ void dequant_q6_k(const void* src, std::size_t n_elems, float* out) {
     }
 }
 
+void dequant_i2_s(const void* src, std::size_t n_elems, float* out) {
+    // 2-bit packed: 4 weights per byte. Mapping per microsoft/BitNet:
+    //   0b00 -> 0, 0b01 -> +1, 0b10 -> -1, 0b11 -> 0 (sentinel; treat as 0).
+    static const float LUT[4] = { 0.0f, +1.0f, -1.0f, 0.0f };
+    const std::uint8_t* bytes = static_cast<const std::uint8_t*>(src);
+    std::size_t n_bytes = n_elems / 4;
+    for (std::size_t b = 0; b < n_bytes; ++b) {
+        std::uint8_t v = bytes[b];
+        out[b * 4 + 0] = LUT[(v >> 0) & 3];
+        out[b * 4 + 1] = LUT[(v >> 2) & 3];
+        out[b * 4 + 2] = LUT[(v >> 4) & 3];
+        out[b * 4 + 3] = LUT[(v >> 6) & 3];
+    }
+}
+
 void dequant_q4_k_m(const void* src, std::size_t n_elems, float* out) {
     constexpr std::size_t QK_K = 256;
     constexpr std::size_t BLK_BYTES = 144;

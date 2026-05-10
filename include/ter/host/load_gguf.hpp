@@ -13,6 +13,7 @@ namespace ter::host {
 // single experimental knob.
 ter::TritTensor tensor_to_trit(const nt::Tensor& t,
                                int n_trits_per_elem = 9,
-                               bool format_a_roundtrip = false);
+                               bool format_a_roundtrip = false,
+                               int format_a_mant_trits = 9);
 
 }  // namespace ter::host

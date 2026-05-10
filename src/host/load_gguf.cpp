@@ -7,7 +7,7 @@
 namespace ter::host {
 
 ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem,
-                               bool format_a_roundtrip) {
+                               bool format_a_roundtrip, int format_a_mant_trits) {
     if (t.device() != nt::Device::CPU) {
         throw std::runtime_error("tensor_to_trit: input must be on CPU");
     }
@@ -39,16 +39,19 @@ ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem,
         case nt::DType::Q6_K:
             nt::dequant_q6_k(t.data(), n_elems, tmp.data());
             break;
+        case nt::DType::I2_S:
+            nt::dequant_i2_s(t.data(), n_elems, tmp.data());
+            break;
         default:
             throw std::runtime_error("tensor_to_trit: unsupported dtype "
-                                     "(F16/F32/Q8_0/Q4_K_M/Q6_K supported; Q5_K/Q2_K land later)");
+                                     "(F16/F32/Q8_0/Q4_K_M/Q6_K/I2_S supported; Q5_K/Q2_K land later)");
     }
 
     // Optional Format A round-trip: bake tfloat encoding noise into the float
     // buffer before Format B quantization.
     if (format_a_roundtrip) {
         for (std::size_t i = 0; i < n_elems; ++i) {
-            tmp[i] = ter::TFloat::from_float(tmp[i]).to_float();
+            tmp[i] = ter::TFloat::from_float_trits(tmp[i], format_a_mant_trits).to_float();
         }
     }
 

@@ -17,13 +17,49 @@ struct TFloat {
     int8_t  exp      = 0;     // [-121, 121]
     int16_t mantissa = 0;     // [-9841, 9841]
 
-    static constexpr int16_t MANT_MAX = 9841;   // 3^9 / 2
+    static constexpr int16_t MANT_MAX = 9841;   // 3^9 / 2 (default 9-trit mantissa)
     static constexpr int8_t  EXP_MAX  = 121;    // (3^5 - 1) / 2
 
     bool is_zero() const noexcept { return mantissa == 0; }
 
+    // Variable-mantissa encoder: project x onto Format A with the given
+    // mantissa-trit budget. mant_trits=9 is the default (15-trit total).
+    // Smaller mantissa => fewer total trits per element but coarser precision.
+    static TFloat from_float_trits(float x, int mant_trits) noexcept {
+        TFloat t;
+        if (!std::isfinite(x) || x == 0.0f || mant_trits <= 0) {
+            return t;
+        }
+        // mant_max = (3^mant_trits - 1) / 2.
+        long long m_max = 1;
+        for (int i = 0; i < mant_trits; ++i) m_max *= 3;
+        m_max = (m_max - 1) / 2;
+        if (m_max > MANT_MAX) m_max = MANT_MAX;  // clamp to storage capacity
+
+        double v = static_cast<double>(x);
+        double absv = std::fabs(v);
+        int exp = static_cast<int>(std::floor(std::log(absv) / std::log(3.0))) - (mant_trits - 1);
+        double m = v / std::pow(3.0, static_cast<double>(exp));
+        while (std::fabs(m) > static_cast<double>(m_max) && exp < EXP_MAX) {
+            ++exp;
+            m = v / std::pow(3.0, static_cast<double>(exp));
+        }
+        while (std::fabs(m) < static_cast<double>(m_max) / 3.0 && exp > -EXP_MAX) {
+            --exp;
+            m = v / std::pow(3.0, static_cast<double>(exp));
+        }
+        if (exp >  EXP_MAX) exp =  EXP_MAX;
+        if (exp < -EXP_MAX) exp = -EXP_MAX;
+        long mr = std::lround(v / std::pow(3.0, static_cast<double>(exp)));
+        if (mr >  m_max) mr =  m_max;
+        if (mr < -m_max) mr = -m_max;
+        t.exp = static_cast<int8_t>(exp);
+        t.mantissa = static_cast<int16_t>(mr);
+        return t;
+    }
+
     // Encode an arbitrary float into Format A. Round-to-nearest. Out-of-range
-    // values clamp to ±max-representable.
+    // values clamp to ±max-representable. Uses the default 9-trit mantissa.
     static TFloat from_float(float x) noexcept {
         TFloat t;
         if (!std::isfinite(x) || x == 0.0f) {

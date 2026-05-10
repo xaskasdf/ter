@@ -32,6 +32,7 @@ enum class DType : uint8_t {
     Q2_K   = 7,  // For KV-cache RotateKV
     I32    = 8,
     TERNARY = 9,
+    I2_S   = 10,  // microsoft/BitNet b1.58 ternary 2-bit packed
     COUNT
 };
 
@@ -48,6 +49,7 @@ inline size_t dtype_size(DType dt) {
         case DType::Q6_K:   return 210;
         case DType::Q2_K:   return 84;
         case DType::TERNARY: return 1;
+        case DType::I2_S:    return 1;   // 2 bits per weight, 4 weights per byte
         default: return 0;
     }
 }
@@ -64,6 +66,7 @@ inline size_t dtype_block_size(DType dt) {
         case DType::Q6_K:   return 256;
         case DType::Q2_K:   return 256;
         case DType::TERNARY: return 1;
+        case DType::I2_S:    return 4;   // 4 weights packed per byte
         default: return 1;
     }
 }
@@ -80,6 +83,7 @@ inline const char* dtype_name(DType dt) {
         case DType::Q2_K:   return "Q2_K";
         case DType::I32:    return "I32";
         case DType::TERNARY: return "TERNARY";
+        case DType::I2_S:   return "I2_S";
         default: return "UNKNOWN";
     }
 }
@@ -200,6 +204,9 @@ enum class GGMLType : uint32_t {
     I64     = 27,
     F64     = 28,
     IQ1_M   = 29,
+    // microsoft/BitNet b1.58 custom ggml type for ternary i2_s weights.
+    // Not in upstream ggml; reserved as 36 by the bitnet.cpp fork.
+    I2_S_BITNET = 36,
 };
 
 inline DType ggml_to_dtype(GGMLType t) {
@@ -213,6 +220,7 @@ inline DType ggml_to_dtype(GGMLType t) {
         case GGMLType::Q6_K: return DType::Q6_K;
         case GGMLType::Q2_K: return DType::Q2_K;
         case GGMLType::I32:  return DType::I32;
+        case GGMLType::I2_S_BITNET: return DType::I2_S;
         default:             return DType::F32;  // fallback
     }
 }
