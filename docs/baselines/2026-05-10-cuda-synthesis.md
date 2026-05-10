@@ -102,6 +102,59 @@ Concrete experiments that this enables:
 These were prohibitive on AVX2 (~6h per single architectural variant
 exploration); now ~minutes each.
 
+## Ternary-optimized kernels: the win
+
+After iterative kernel work (v4 wide → v6 dp4a → v7 colmaj → v8 warp →
+v10 unroll → v11 warp4), the packed ternary kernel **beats cuBLAS INT8
+tensor cores** on Llama 1B at M=1, **without using tensor cores**.
+
+### Final kernel: v11 warp4 (4 cols per warp + dp4a)
+- Each warp computes 4 output columns that share a `byte_col`
+- 32 threads per warp split K equally and warp-shuffle reduce
+- Column-major byte layout: 4 contiguous K-bytes = 1 `uint32` load
+- Per K-iter: 1 byte read → 4 trit decodes → 4 `__dp4a` calls = 16 MACs
+- Information density: 16 MACs per byte memory access
+
+### Result table (Llama 1B forward, matmul fabric only, M=1)
+
+| Backend | ms / forward | GMAC/s | vs INT8 TC |
+|---|---:|---:|---:|
+| v4 wide (scalar K-loop, original) | 384 | 3.2 | 0.03× |
+| v6 dp4a (row-major + dp4a) | 172 | 7.2 | 0.07× |
+| v7 colmaj (col-major + dp4a) | 99 | 12.6 | 0.12× |
+| v8 warp (1 warp per col) | 29.2 | 42.4 | 0.41× |
+| v10 unroll (warp + 16-K body) | 14.1 | 87.7 | 0.85× |
+| **v11 warp4 (4 cols/warp + dp4a)** | **7.65** | **162** | **1.57× FASTER** |
+| **Best-per-shape dispatch** | **7.27** | **170** | **1.65× FASTER** |
+| cuBLAS INT8 TC reference | 12.02 | 103 | 1× |
+
+### Per-shape v11 vs INT8 TC
+
+| Shape | v11 GMAC/s | INT8 TC | v11/TC |
+|---|---:|---:|---:|
+| Wdown (K=8192, N=2048) | 355 | 85 | **4.18× faster** |
+| lm_head (N=128256) | 317 | 180 | **1.76× faster** |
+| Wq (N=2048) | 73 | 43 | 1.69× faster |
+| Wo (N=2048) | 74 | 52 | 1.44× faster |
+| Wup (N=8192) | 375 | 262 | 1.43× faster |
+| Wk (N=512) | 19.0 | 15.4 | 1.23× faster |
+| Wgate (N=8192) | 199 | 187 | 1.07× (parity) |
+| Wv (N=512) | 13.1 | 17.2 | 0.76× slower (only loss) |
+
+### What this proves
+
+The architectural memory win (8× compression) of ternary substrate
+materializes as wall-clock advantage when the kernel exploits the
+"4 cols share a byte" structure of packed-trit storage. The key insight:
+each memory transaction of 1 byte yields 16 useful MACs (4 cols × 4 K),
+giving 16:1 info-density over INT8 (1 byte = 1 MAC).
+
+This is the H3 architectural claim made concrete: **substrate-data
+alignment yields wall-clock superiority over the binary-substrate
+production path (INT8 TC) with custom-but-tractable CUDA kernels**. No
+tensor cores, no exotic intrinsics — just `__dp4a` (CUDA SIMD int8x4)
+plus column-major byte layout plus 4-cols-per-warp dispatch.
+
 ## Quality validation (the H3 closure)
 
 `tests/test_llama_bitnet_quality.cpp` runs the same Llama 1B BOS forward
