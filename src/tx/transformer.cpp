@@ -268,6 +268,58 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader, int max_
     return tx;
 }
 
+BrandonTransformer load_bitnet_transformer(const nt::GGUFLoader& loader, int max_seq_len, int n_trits) {
+    BrandonTransformer tx;
+    const auto& cfg = loader.config();
+
+    // BitNet sets bitnet-b1.58.vocab_size in metadata, so cfg.vocab_size is
+    // already populated. Fall back to token_embd shape just in case.
+    int vocab_size = cfg.vocab_size;
+    if (vocab_size <= 0) {
+        const auto* tok_info = loader.tensor_info("token_embd.weight");
+        if (!tok_info || tok_info->shape.size() != 2)
+            throw std::runtime_error("load_bitnet_transformer: cannot derive vocab_size");
+        vocab_size = static_cast<int>(tok_info->shape[1]);
+    }
+
+    tx.vocab_size         = vocab_size;
+    tx.hidden_size        = cfg.hidden_size;
+    tx.head_dim           = cfg.head_dim;
+    tx.n_heads            = cfg.n_heads;
+    tx.n_kv_heads         = cfg.n_kv_heads;
+    tx.intermediate_size  = cfg.intermediate_size;
+    tx.n_layers           = cfg.n_layers;
+    tx.rmsnorm_eps        = cfg.norm_eps;
+    tx.n_registers        = 0;
+    tx.use_dwa            = false;
+    tx.use_value_residual = false;
+    tx.weight_tying       = (loader.tensor_info("output.weight") == nullptr);
+
+    tx.layer_map.resize(static_cast<size_t>(tx.n_layers));
+    for (int i = 0; i < tx.n_layers; ++i) tx.layer_map[static_cast<size_t>(i)] = i;
+
+    tx.blocks.reserve(static_cast<size_t>(tx.n_layers));
+    for (int i = 0; i < tx.n_layers; ++i) {
+        LayerWeights L = build_block(loader, i, n_trits);
+        auto pfx = std::string("blk.") + std::to_string(i) + ".";
+        // BitNet sub-norms (mandatory for this arch).
+        L.attn_sub_norm_w = as_floats(loader.get_tensor(pfx + "attn_sub_norm.weight"));
+        L.ffn_sub_norm_w  = as_floats(loader.get_tensor(pfx + "ffn_sub_norm.weight"));
+        tx.blocks.push_back(std::move(L));
+    }
+
+    tx.token_embd    = quant_t(loader.get_tensor("token_embd.weight"), n_trits);
+    tx.output_norm_w = as_floats(loader.get_tensor("output_norm.weight"));
+    if (!tx.weight_tying) {
+        tx.lm_head = quant_t(loader.get_tensor("output.weight"), n_trits);
+    }
+
+    tx.kv_caches.resize(static_cast<size_t>(tx.n_layers));
+    for (auto& c : tx.kv_caches) c.resize(max_seq_len, tx.n_kv_heads, tx.head_dim);
+
+    return tx;
+}
+
 int register_prefill(
     Sim& sim,
     KernelTable& kt,

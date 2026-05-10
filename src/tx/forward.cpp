@@ -385,6 +385,14 @@ void forward_layer(
     }
 
     // 5) Wo projection: attn_out = ctx @ Wo
+    // BitNet b1.58: apply attn_sub_norm to ctx before Wo projection. The
+    // sub-norm gain absorbs the per-tensor weight scale gamma so the {-1,0,+1}
+    // matmul produces the correct magnitude.
+    if (!L.attn_sub_norm_w.empty()) {
+        std::vector<float> ctx_normed;
+        rmsnorm_host(ctx, L.attn_sub_norm_w, rmsnorm_eps, ctx_normed);
+        ctx = std::move(ctx_normed);
+    }
     TritTensor ctxt = quantize(ctx.data(), {1, q_dim}, 9);
     std::vector<float> attn_out;
     mm_row(sim, kt, id_mm, ctxt, 0, L.Wo, q_dim, hidden_size, attn_out);
@@ -418,6 +426,12 @@ void forward_layer(
         silu_mul_host(gate, up, ff);
 
     // 10) Wdown projection: ff_out = ff @ Wdown
+    // BitNet b1.58: apply ffn_sub_norm to silu(gate)*up before Wdown.
+    if (!L.ffn_sub_norm_w.empty()) {
+        std::vector<float> ff_normed;
+        rmsnorm_host(ff, L.ffn_sub_norm_w, rmsnorm_eps, ff_normed);
+        ff = std::move(ff_normed);
+    }
     TritTensor fft = quantize(ff.data(), {1, intermediate_size}, 9);
     std::vector<float> ff_out;
     mm_row(sim, kt, id_mm, fft, 0, L.Wdown, intermediate_size, hidden_size, ff_out);

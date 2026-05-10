@@ -220,6 +220,14 @@ ter_add_test(test_bitnet_gguf_load)
 target_link_libraries(test_bitnet_gguf_load PRIVATE nt_infra)
 set_tests_properties(test_bitnet_gguf_load PROPERTIES TIMEOUT 120)
 
+ter_add_test(test_bitnet_forward)
+target_link_libraries(test_bitnet_forward PRIVATE nt_infra)
+target_compile_definitions(test_bitnet_forward PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_bitnet_forward PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 3600)
+
 ter_add_test(test_format_a_vs_b)
 target_link_libraries(test_format_a_vs_b PRIVATE nt_infra)
 target_compile_definitions(test_format_a_vs_b PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")

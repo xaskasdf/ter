@@ -1,6 +1,7 @@
 #include <ter/sim.hpp>
 #include <ter/kernels.hpp>
 #include <ter/assembler.hpp>
+#include <cstring>
 #include <stdexcept>
 
 namespace ter {
@@ -35,13 +36,29 @@ KernelId KernelTable::install(Sim& sim, const std::string& name,
             sim.mem().store_word(next_addr_++, blob[i]);
         }
     }
-    by_name_[name] = id;
-    return id;
+    // Find the first unused slot.
+    for (auto& e : entries_) {
+        if (e.used) continue;
+        std::strncpy(e.name, name.c_str(), kNameMax - 1);
+        e.name[kNameMax - 1] = '\0';
+        e.id   = id;
+        e.used = true;
+        return id;
+    }
+    throw std::runtime_error("KernelTable::install: no free slot");
 }
 
 KernelId KernelTable::find(const std::string& name) const noexcept {
-    auto it = by_name_.find(name);
-    return it == by_name_.end() ? KernelId{} : it->second;
+    return find(name.c_str());
+}
+
+KernelId KernelTable::find(const char* name) const noexcept {
+    if (!name) return KernelId{};
+    for (const auto& e : entries_) {
+        if (!e.used) continue;
+        if (std::strncmp(e.name, name, kNameMax) == 0) return e.id;
+    }
+    return KernelId{};
 }
 
 int64_t Sim::call_kernel(KernelTable&, KernelId id,

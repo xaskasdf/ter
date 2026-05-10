@@ -14,6 +14,12 @@ struct LayerWeights {
     TritTensor Wdown;
     std::vector<float> attn_norm_w;
     std::vector<float> ffn_norm_w;
+    // BitNet b1.58 sub-norms: empty for non-BitNet architectures.
+    // attn_sub_norm: (hidden,) -- applied to attention output BEFORE Wo projection.
+    // ffn_sub_norm:  (intermediate,) -- applied to silu(gate)*up BEFORE Wdown.
+    // The sub-norm gain absorbs BitNet's per-tensor weight scale gamma.
+    std::vector<float> attn_sub_norm_w;
+    std::vector<float> ffn_sub_norm_w;
 };
 
 LayerWeights quantize_layer(

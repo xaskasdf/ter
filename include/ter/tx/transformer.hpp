@@ -85,6 +85,17 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader,
                                           bool format_a_roundtrip = false,
                                           int format_a_mant_trits = 9);
 
+// Load microsoft/bitnet-b1.58-2B-4T-gguf (or any bitnet-b1.58 arch GGUF).
+// Differs from load_llama_transformer in two ways:
+//   - per-block attn_sub_norm + ffn_sub_norm tensors are loaded (their gain
+//     absorbs BitNet's per-tensor weight scale gamma)
+//   - weights are i2_s (ggml type 36) -> dequant_i2_s -> tensor_to_trit
+// The forward path reuses forward_layer; sub_norms are applied at the right
+// positions when LayerWeights.{attn,ffn}_sub_norm_w is non-empty.
+BrandonTransformer load_bitnet_transformer(const nt::GGUFLoader& loader,
+                                           int max_seq_len,
+                                           int n_trits = 9);
+
 // Run the n_registers register-token prefill (per integration guide §4d).
 // MUST be called once at the start of every chat session — KV cache for slots 0..n-1
 // must hold THIS chat's register activations, not the previous chat's. The caller is
