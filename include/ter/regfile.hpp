@@ -2,7 +2,13 @@
 #include <ter/word.hpp>
 #include <ter/vec.hpp>
 #include <array>
-#include <stdexcept>
+#ifdef TER_FREESTANDING
+#  include <cstdlib>
+#  define TER_REG_FAIL(msg) std::abort()
+#else
+#  include <stdexcept>
+#  define TER_REG_FAIL(msg) throw std::out_of_range(msg)
+#endif
 
 namespace ter {
 
@@ -46,10 +52,10 @@ public:
 
 private:
     static void check(int idx) {
-        if (idx < 0 || idx >= kScalarRegs) throw std::out_of_range("RegFile index");
+        if (idx < 0 || idx >= kScalarRegs) TER_REG_FAIL("RegFile index");
     }
-    static void vcheck(int idx) { if (idx<0||idx>=kVecRegs) throw std::out_of_range("vreg"); }
-    static void acheck(int idx) { if (idx<0||idx>=kAccRegs) throw std::out_of_range("acc"); }
+    static void vcheck(int idx) { if (idx<0||idx>=kVecRegs) TER_REG_FAIL("vreg"); }
+    static void acheck(int idx) { if (idx<0||idx>=kAccRegs) TER_REG_FAIL("acc"); }
 
     std::array<Word27, kScalarRegs> scalars_{};
     Word27 pc_{};

@@ -1,12 +1,15 @@
-// F10: K4 ring-0 backend wrapper.
-// Hosted-mode implementation (libstdc++): wraps the existing Sim+KernelTable.
-// Replace internals with freestanding equivalents when porting to osito-k ring 0.
+// F10.x: K4 ring-0 backend wrapper, freestanding-friendly at the wrapper layer.
+//
+// Compiled with -fno-exceptions -fno-rtti and using only raw arrays/new[]
+// instead of std::vector/std::unordered_map. The wrapped Sim and KernelTable
+// still use libstdc++ internally (std::vector for memory, std::unordered_map
+// for counter buckets and kernel lookup); see docs/k4-freestanding.md for the
+// concrete porting checklist required to boot in osito-k ring 0.
 #include <ter_k4/ter_k4.h>
 #include <ter/sim.hpp>
 #include <ter/kernels.hpp>
 #include <ter/isa.hpp>
-#include <vector>
-#include <cstring>
+#include <new>
 
 struct ter_k4_handle_t {
     ter::Sim sim;
@@ -28,10 +31,15 @@ int ter_k4_install_kernel(ter_k4_handle_t* h,
                           size_t blob_n_words)
 {
     if (!h || !name || !blob_bytes) return -1;
-    // The existing KernelTable::install loads from a Word27 array. We accept
-    // raw bytes here for ABI clarity; reinterpret as Word27.
+    // Stage the blob into a freshly-allocated Word27 buffer (no std::vector
+    // copy ctor pull-in at this layer). KernelTable::install still copies
+    // through a vector internally; that's the libstdc++ gap.
+    ter::Word27* tmp = new (std::nothrow) ter::Word27[blob_n_words];
+    if (!tmp) return -3;
     const ter::Word27* blob = static_cast<const ter::Word27*>(blob_bytes);
-    std::vector<ter::Word27> v(blob, blob + blob_n_words);
+    for (size_t i = 0; i < blob_n_words; ++i) tmp[i] = blob[i];
+    std::vector<ter::Word27> v(tmp, tmp + blob_n_words);
+    delete[] tmp;
     h->kt.install(h->sim, name, v);
     return 0;
 }
@@ -42,6 +50,7 @@ int ter_k4_call(ter_k4_handle_t* h,
                 size_t n_args)
 {
     if (!h || !name) return -1;
+    if (n_args > 7) return -4;  // calling convention only routes R1..R7
     auto id = h->kt.find(name);
     if (!id.valid) return -2;
     std::vector<int64_t> arg_vec(args, args + n_args);

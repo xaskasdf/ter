@@ -32,8 +32,18 @@ add_executable(dump_gguf_tensors tools/dump_gguf_tensors.cpp)
 target_link_libraries(dump_gguf_tensors PRIVATE nt_infra)
 target_compile_options(dump_gguf_tensors PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
-# F10: K4 ring-0 backend (hosted-mode wrapper for now; freestanding port pending).
+# F10: K4 ring-0 backend.
+# Wrapper layer (src/k4/ter_k4.cpp) is freestanding-friendly: no exceptions,
+# no RTTI, no std::vector/string in the public-facing code. The wrapped Sim
+# and KernelTable still use libstdc++ internally; full ring-0 boot requires
+# porting those (tracked in docs/k4-freestanding.md).
 add_library(ter_k4 STATIC src/k4/ter_k4.cpp)
-target_compile_options(ter_k4 PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_options(ter_k4 PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+    -fno-exceptions -fno-rtti)
+target_compile_definitions(ter_k4 PRIVATE TER_FREESTANDING)
+# Memory and RegFile bounds violations call std::abort() instead of throwing
+# under TER_FREESTANDING (see headers). Hosted-mode tests still get the
+# throw path so doctest can introspect failures.
 target_include_directories(ter_k4 PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ter_k4 PUBLIC ter)
