@@ -8,6 +8,7 @@ namespace ter {
 class OpCounters {
 public:
     void bump(Opcode op) noexcept { ++counts_[static_cast<int16_t>(op)]; ++total_; }
+    void bump_n(Opcode op, uint64_t n) noexcept { counts_[static_cast<int16_t>(op)] += n; total_ += n; }
     uint64_t get(Opcode op) const noexcept {
         auto it = counts_.find(static_cast<int16_t>(op));
         return it == counts_.end() ? 0 : it->second;

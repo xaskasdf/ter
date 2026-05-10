@@ -178,6 +178,13 @@ std::vector<float> forward_token(
     // 4) Logits = hidden @ W_lm.T. With weight_tying, W_lm is token_embd
     // (already dequantized into emb_full). Otherwise use the separate tx.lm_head.
     // The projection matrix is row-major (vocab_size, hidden_size).
+    //
+    // F8 honest counter: this projection runs as a host-side double loop for
+    // wall-clock speed (a kernel call per output cell would inflate runtime
+    // by ~2-3 min on Llama 1B). To keep the TVMAC count consistent with what
+    // a full kernel-routed forward would report, analytically bump the TVMAC
+    // counter by the number tk_matmul_b_9t would issue: ceil(K/27) tiles per
+    // output cell * vocab_size cells.
     const float* W_lm = nullptr;
     std::vector<float> lm_full;
     if (!tx.lm_head.payload.empty()) {
@@ -186,6 +193,10 @@ std::vector<float> forward_token(
         W_lm = lm_full.data();
     } else {
         W_lm = emb_full.data();
+    }
+    {
+        uint64_t k_tiles = (static_cast<uint64_t>(H) + 26ull) / 27ull;
+        sim.counters().bump_n(Opcode::TVMAC, k_tiles * static_cast<uint64_t>(tx.vocab_size));
     }
     std::vector<float> logits(static_cast<size_t>(tx.vocab_size), 0.0f);
     for (int v = 0; v < tx.vocab_size; ++v) {
