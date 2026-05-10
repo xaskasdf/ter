@@ -175,16 +175,25 @@ std::vector<float> forward_token(
             hidden[i] = static_cast<float>(static_cast<double>(hidden[i]) * rms_inv) * tx.output_norm_w[i];
     }
 
-    // 4) Logits = hidden @ token_embd.T  (with weight_tying, output uses the same matrix).
-    // token_embd payload is (vocab_size, hidden_size) row-major after the GGUF reversal trick.
-    // logits[v] = sum_i hidden[i] * embd[v, i]
+    // 4) Logits = hidden @ W_lm.T. With weight_tying, W_lm is token_embd
+    // (already dequantized into emb_full). Otherwise use the separate tx.lm_head.
+    // The projection matrix is row-major (vocab_size, hidden_size).
+    const float* W_lm = nullptr;
+    std::vector<float> lm_full;
+    if (!tx.lm_head.payload.empty()) {
+        lm_full.resize(tx.lm_head.num_elems());
+        ter::dequantize(tx.lm_head, lm_full.data());
+        W_lm = lm_full.data();
+    } else {
+        W_lm = emb_full.data();
+    }
     std::vector<float> logits(static_cast<size_t>(tx.vocab_size), 0.0f);
     for (int v = 0; v < tx.vocab_size; ++v) {
         double acc = 0.0;
         for (int i = 0; i < H; ++i) {
             acc += static_cast<double>(hidden[static_cast<size_t>(i)])
-                 * static_cast<double>(emb_full[static_cast<size_t>(v) * static_cast<size_t>(H)
-                                                + static_cast<size_t>(i)]);
+                 * static_cast<double>(W_lm[static_cast<size_t>(v) * static_cast<size_t>(H)
+                                              + static_cast<size_t>(i)]);
         }
         logits[static_cast<size_t>(v)] = static_cast<float>(acc);
     }
@@ -229,6 +238,13 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader, int max_
 
     tx.token_embd    = quant_t(loader.get_tensor("token_embd.weight"), n_trits);
     tx.output_norm_w = as_floats(loader.get_tensor("output_norm.weight"));
+
+    // If the GGUF carries a separate output.weight (TinyStories Q4_K_M does),
+    // it overrides the tied projection. weight_tying flips off in that case.
+    if (loader.tensor_info("output.weight") != nullptr) {
+        tx.lm_head      = quant_t(loader.get_tensor("output.weight"), n_trits);
+        tx.weight_tying = false;
+    }
 
     tx.kv_caches.resize(static_cast<size_t>(tx.n_layers));
     for (auto& c : tx.kv_caches) c.resize(max_seq_len, tx.n_kv_heads, tx.head_dim);

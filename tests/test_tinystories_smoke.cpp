@@ -1,11 +1,8 @@
-// F6.3: Llama 3.2 1B Q8_0 smoke test on the ternary substrate.
-// Loads the GGUF, runs ONE forward pass at pos=0 with a single token (BOS),
-// asserts the resulting logits vector is the right size and all-finite.
-//
-// Runtime: per-forward cost dominated by 16 layers * 7 matmuls each at the
-// 2048/8192 dimensions; expect several minutes. We skip the test cleanly if
-// the model file isn't on disk so the suite stays usable on machines without
-// the 1.32 GB Q8_0 download.
+// F5.4i: TinyStories Llama-2 20M Q4_K_M smoke test.
+// Tests the Q4_K_M and Q6_K dequant paths end-to-end (TinyStories mixes both:
+// most projections are Q4_K, output.weight and a few ffn_down are Q6_K).
+// Loads, runs ONE forward at pos=0, asserts logits finite. Should run in
+// seconds (4 layers, hidden=256), unlike the multi-minute Llama 1B smoke.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 #include <ter/tx/transformer.hpp>
@@ -23,8 +20,7 @@
 #endif
 
 namespace {
-constexpr const char* GGUF_PATH =
-    "/Users/pc/osito-a-models/downloads/llama-3.2-1b-instruct/llama-3.2-1b-instruct-q8_0.gguf";
+constexpr const char* GGUF_PATH = "/Users/pc/osito-a-models/build/tinystories-20m-q4km.gguf";
 
 bool file_exists(const char* path) {
     std::ifstream f(path);
@@ -32,12 +28,11 @@ bool file_exists(const char* path) {
 }
 }  // namespace
 
-TEST_CASE("Llama 3.2 1B Q8_0: load + 1 forward + finite logits") {
+TEST_CASE("TinyStories 20M Q4_K_M: load + 1 forward + finite logits") {
     if (!file_exists(GGUF_PATH)) {
-        MESSAGE("Llama 3.2 1B GGUF not found at ", GGUF_PATH, " -- skipping");
+        MESSAGE("TinyStories GGUF not found -- skipping");
         return;
     }
-
     using namespace ter;
     using namespace ter::tx;
 
@@ -45,7 +40,7 @@ TEST_CASE("Llama 3.2 1B Q8_0: load + 1 forward + finite logits") {
     REQUIRE(loader.load(GGUF_PATH));
 
     const auto& cfg = loader.config();
-    MESSAGE("Llama config: hidden=", cfg.hidden_size,
+    MESSAGE("TS config: hidden=", cfg.hidden_size,
             " ffn=", cfg.intermediate_size,
             " layers=", cfg.n_layers,
             " heads=", cfg.n_heads,
@@ -55,25 +50,23 @@ TEST_CASE("Llama 3.2 1B Q8_0: load + 1 forward + finite logits") {
     BrandonTransformer tx = load_llama_transformer(loader, /*max_seq=*/8, /*n_trits=*/9);
 
     REQUIRE(tx.n_layers > 0);
-    REQUIRE(tx.vocab_size == 128256);
-    REQUIRE(tx.hidden_size == 2048);
-    REQUIRE(static_cast<int>(tx.blocks.size()) == tx.n_layers);
-    REQUIRE(tx.layer_map.size() == static_cast<size_t>(tx.n_layers));
-    for (int i = 0; i < tx.n_layers; ++i) CHECK(tx.layer_map[static_cast<size_t>(i)] == i);
+    REQUIRE(tx.vocab_size == 32000);
+    REQUIRE(tx.hidden_size == 256);
+    // TinyStories has separate output.weight, so weight_tying should flip off.
+    CHECK_FALSE(tx.weight_tying);
+    CHECK(tx.lm_head.payload.size() > 0);
 
     Sim s(64 * 1024);
     KernelTable kt;
     install_default_kernels(s, kt, TER_KERNELS_DIR);
     LutAddrs luts = load_default_luts(s, "lut_data");
 
-    // BOS token (Llama 3 uses 128000 = <|begin_of_text|>); fall back to 1 if metadata absent.
     int bos = cfg.bos_token_id > 0 ? cfg.bos_token_id : 1;
     if (bos >= tx.vocab_size) bos = 1;
-    MESSAGE("Forward at pos=0 with token id=", bos);
 
     s.counters().reset();
     auto logits = forward_token(s, kt, tx, bos, /*pos=*/0, luts, /*state=*/nullptr);
-    dump_op_stats(s, "Llama 3.2 1B Q8_0, 1 forward @ pos=0",
+    dump_op_stats(s, "TinyStories 20M Q4_K_M, 1 forward",
                   tx.hidden_size, tx.intermediate_size,
                   tx.n_heads, tx.n_kv_heads, tx.head_dim,
                   tx.n_layers, tx.vocab_size);

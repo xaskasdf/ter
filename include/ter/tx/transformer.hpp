@@ -20,8 +20,10 @@ struct BrandonTransformer {
     std::vector<LayerWeights> blocks;     // size = brandon.block_count (12 for brandon-tiny)
     std::vector<KVCache>      kv_caches;  // size = brandon.compute_layer_count (24); per-logical-layer
 
-    // Quantized embedding/output (weight_tying => same tensor used for both)
+    // Quantized embedding/output (weight_tying => same tensor used for both;
+    // otherwise lm_head holds the separate output.weight).
     TritTensor token_embd;                // (vocab_size, hidden_size) — F16 source
+    TritTensor lm_head;                   // empty when weight_tying=true
 
     // Norms/aux kept as float (small, no per-tensor scale needed)
     std::vector<float> output_norm_w;     // (hidden_size,)

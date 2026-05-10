@@ -59,4 +59,91 @@ void dequant_q8_0(const void* src, std::size_t n_elems, float* out) {
     }
 }
 
+namespace {
+// Per ggml block_q4_K convention: extract the 6-bit scale and min for sub-block j
+// (j in 0..7) from the packed 12-byte `scales` array. Mirrors get_scale_min_k4
+// from ggml-quants.c.
+inline void get_scale_min_k4(int j, const std::uint8_t* q,
+                             std::uint8_t* d, std::uint8_t* m)
+{
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4)  | ((q[j - 0] >> 6) << 4);
+    }
+}
+}  // namespace
+
+void dequant_q6_k(const void* src, std::size_t n_elems, float* out) {
+    constexpr std::size_t QK_K = 256;
+    constexpr std::size_t BLK_BYTES = 210;
+    const std::uint8_t* bytes = static_cast<const std::uint8_t*>(src);
+    std::size_t n_blocks = n_elems / QK_K;
+    for (std::size_t b = 0; b < n_blocks; ++b) {
+        const std::uint8_t* blk = bytes + b * BLK_BYTES;
+        const std::uint8_t* ql = blk;                              // 128 bytes
+        const std::uint8_t* qh = blk + 128;                        // 64 bytes
+        const std::int8_t*  sc = reinterpret_cast<const std::int8_t*>(blk + 192);  // 16 bytes
+        std::uint16_t d_h;
+        std::memcpy(&d_h, blk + 208, sizeof(d_h));
+        float d = half_to_float(d_h);
+
+        float* y = out + b * QK_K;
+        // Process two 128-elem halves; ggml layout interleaves ql/qh in groups of 32.
+        for (std::size_t base = 0; base < QK_K; base += 128) {
+            const std::uint8_t* ql_h = ql + (base / 128) * 64;
+            const std::uint8_t* qh_h = qh + (base / 128) * 32;
+            const std::int8_t*  sc_h = sc + (base / 128) * 8;
+            for (int l = 0; l < 32; ++l) {
+                int is = l / 16;
+                std::int8_t q1 = static_cast<std::int8_t>((ql_h[l +  0] & 0xF) | (((qh_h[l] >> 0) & 3) << 4)) - 32;
+                std::int8_t q2 = static_cast<std::int8_t>((ql_h[l + 32] & 0xF) | (((qh_h[l] >> 2) & 3) << 4)) - 32;
+                std::int8_t q3 = static_cast<std::int8_t>((ql_h[l +  0] >>  4) | (((qh_h[l] >> 4) & 3) << 4)) - 32;
+                std::int8_t q4 = static_cast<std::int8_t>((ql_h[l + 32] >>  4) | (((qh_h[l] >> 6) & 3) << 4)) - 32;
+                y[base + l +  0] = d * static_cast<float>(sc_h[is + 0]) * static_cast<float>(q1);
+                y[base + l + 32] = d * static_cast<float>(sc_h[is + 2]) * static_cast<float>(q2);
+                y[base + l + 64] = d * static_cast<float>(sc_h[is + 4]) * static_cast<float>(q3);
+                y[base + l + 96] = d * static_cast<float>(sc_h[is + 6]) * static_cast<float>(q4);
+            }
+        }
+    }
+}
+
+void dequant_q4_k_m(const void* src, std::size_t n_elems, float* out) {
+    constexpr std::size_t QK_K = 256;
+    constexpr std::size_t BLK_BYTES = 144;
+    const std::uint8_t* bytes = static_cast<const std::uint8_t*>(src);
+    std::size_t n_blocks = n_elems / QK_K;
+    for (std::size_t b = 0; b < n_blocks; ++b) {
+        const std::uint8_t* blk = bytes + b * BLK_BYTES;
+        std::uint16_t d_h, dmin_h;
+        std::memcpy(&d_h,    blk,     sizeof(d_h));
+        std::memcpy(&dmin_h, blk + 2, sizeof(dmin_h));
+        float d    = half_to_float(d_h);
+        float dmin = half_to_float(dmin_h);
+
+        const std::uint8_t* scales = blk + 4;       // 12 bytes
+        const std::uint8_t* qs     = blk + 4 + 12;  // 128 bytes
+
+        float* y = out + b * QK_K;
+        int is = 0;
+        for (std::size_t base = 0; base < QK_K; base += 64) {
+            std::uint8_t sc, mn;
+            get_scale_min_k4(is + 0, scales, &sc, &mn);
+            float d1 = d * static_cast<float>(sc);
+            float m1 = dmin * static_cast<float>(mn);
+            get_scale_min_k4(is + 1, scales, &sc, &mn);
+            float d2 = d * static_cast<float>(sc);
+            float m2 = dmin * static_cast<float>(mn);
+
+            const std::uint8_t* q = qs + (base / 64) * 32;
+            for (int l = 0; l < 32; ++l) y[base + l]      = d1 * static_cast<float>(q[l] & 0xF) - m1;
+            for (int l = 0; l < 32; ++l) y[base + 32 + l] = d2 * static_cast<float>(q[l] >> 4)  - m2;
+            is += 2;
+        }
+    }
+}
+
 }  // namespace nt

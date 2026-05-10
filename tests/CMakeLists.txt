@@ -190,3 +190,19 @@ set_tests_properties(test_llama_smoke PROPERTIES
     FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     TIMEOUT 1800)
+
+ter_add_test(test_llama_generate)
+target_link_libraries(test_llama_generate PRIVATE nt_infra)
+target_compile_definitions(test_llama_generate PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_llama_generate PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 3600)
+
+ter_add_test(test_tinystories_smoke)
+target_link_libraries(test_tinystories_smoke PRIVATE nt_infra)
+target_compile_definitions(test_tinystories_smoke PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_tinystories_smoke PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 600)
