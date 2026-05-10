@@ -236,6 +236,14 @@ set_tests_properties(test_format_a_vs_b_llama PROPERTIES
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     TIMEOUT 3600)
 
+ter_add_test(test_llama_bitnet_quality)
+target_link_libraries(test_llama_bitnet_quality PRIVATE nt_infra)
+target_compile_definitions(test_llama_bitnet_quality PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")
+set_tests_properties(test_llama_bitnet_quality PROPERTIES
+    FIXTURES_REQUIRED "rsqrt_lut;sigmoid_lut;softmax_luts"
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    TIMEOUT 1800)
+
 ter_add_test(test_format_a_vs_b)
 target_link_libraries(test_format_a_vs_b PRIVATE nt_infra)
 target_compile_definitions(test_format_a_vs_b PRIVATE TER_KERNELS_DIR="${CMAKE_SOURCE_DIR}/src/kernels")

@@ -1,13 +1,16 @@
 #include <ter/host/load_gguf.hpp>
 #include <ter/tfloat.hpp>
+#include <ter/bitnet.hpp>
 #include <core/dequant.hpp>
+#include <cmath>
 #include <stdexcept>
 #include <vector>
 
 namespace ter::host {
 
 ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem,
-                               bool format_a_roundtrip, int format_a_mant_trits) {
+                               bool format_a_roundtrip, int format_a_mant_trits,
+                               bool bitnet_roundtrip) {
     if (t.device() != nt::Device::CPU) {
         throw std::runtime_error("tensor_to_trit: input must be on CPU");
     }
@@ -52,6 +55,20 @@ ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem,
     if (format_a_roundtrip) {
         for (std::size_t i = 0; i < n_elems; ++i) {
             tmp[i] = ter::TFloat::from_float_trits(tmp[i], format_a_mant_trits).to_float();
+        }
+    }
+
+    // Optional BitNet b1.58 round-trip: per-tensor absmean scale, clamp to
+    // {-1, 0, +1}, then expand back to float for Format B encoding. This
+    // simulates "what if the model had ternary weights" without changing the
+    // forward path. Combined with n_trits=9 the payload retains values in
+    // {-mti, 0, +mti}; the matmul math is identical -- only the underlying
+    // value distribution shifts.
+    if (bitnet_roundtrip) {
+        std::vector<int8_t> bn(n_elems);
+        float scale = ter::quantize_bitnet(tmp.data(), n_elems, bn.data());
+        for (std::size_t i = 0; i < n_elems; ++i) {
+            tmp[i] = static_cast<float>(bn[i]) * scale;
         }
     }
 

@@ -83,7 +83,8 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader,
                                           int max_seq_len,
                                           int n_trits = 9,
                                           bool format_a_roundtrip = false,
-                                          int format_a_mant_trits = 9);
+                                          int format_a_mant_trits = 9,
+                                          bool bitnet_roundtrip = false);
 
 // Load microsoft/bitnet-b1.58-2B-4T-gguf (or any bitnet-b1.58 arch GGUF).
 // Differs from load_llama_transformer in two ways:
