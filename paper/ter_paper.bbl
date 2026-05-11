@@ -1,0 +1,112 @@
+\begin{thebibliography}{10}
+
+\bibitem{gqa-2023}
+Joshua Ainslie, James Lee-Thorp, Michiel de~Jong, Yury Zemlyanskiy, Federico
+  Lebr{\'o}n, and Sumit Sanghai.
+\newblock {GQA}: Training generalized multi-query transformer models from
+  multi-head checkpoints.
+\newblock {\em EMNLP}, 2023.
+
+\bibitem{setun-1959}
+N.~P. Brusentsov.
+\newblock Setun: The first balanced ternary computer, 1959.
+\newblock Moscow State University, 1959. Historical predecessor of
+  balanced-ternary computing architectures.
+
+\bibitem{brandon-tiny-cortes}
+Samuel Cortes.
+\newblock Brandon-tiny 10m: A 3-phase training pipeline for ultra-small
+  instruction-following language models.
+\newblock 2026.
+
+\bibitem{ntransformer-cortes}
+Samuel Cortes.
+\newblock {ntransformer}: A c++/cuda inference engine for {Llama 3.2 1B}.
+\newblock 2026.
+
+\bibitem{llamacpp}
+Georgi Gerganov.
+\newblock {llama.cpp}: Inference of llama model in pure c/c++.
+\newblock \url{https://github.com/ggerganov/llama.cpp}, 2023.
+\newblock Accessed 2026-05-10.
+
+\bibitem{ggml-quants}
+Georgi Gerganov.
+\newblock {GGML} quantization formats and {GGUF} file structure.
+\newblock 2024.
+
+\bibitem{ternary-mac-energy}
+John~P. Hayes et~al.
+\newblock Energy-efficient {CMOS} implementation of balanced ternary adders and
+  multipliers.
+\newblock {\em IEEE Transactions on Circuits and Systems I}, 2018.
+\newblock Representative literature reference; multiple sources report 25--40\%
+  energy savings per equivalent-precision MAC for balanced ternary CMOS
+  designs.
+
+\bibitem{bitnet158-2024}
+Shuming Ma, Hongyu Wang, Lingxiao Ma, Lei Wang, Wenhui Wang, Shaohan Huang,
+  Li~Dong, Ruiping Wang, Jilong Xue, and Furu Wei.
+\newblock The era of 1-bit llms: All large language models are in 1.58 bits.
+\newblock {\em arXiv preprint arXiv:2402.17764}, 2024.
+
+\bibitem{llama32-meta-2024}
+{Meta AI}.
+\newblock Llama 3.2: Revolutionizing edge {AI} and vision with open,
+  customizable models.
+\newblock
+  \url{https://ai.meta.com/blog/llama-3-2-connect-2024-vision-edge-mobile-devices/},
+  2024.
+
+\bibitem{microsoft-bitnet-cpp}
+{Microsoft}.
+\newblock {BitNet}: Official inference framework for 1-bit llms.
+\newblock \url{https://github.com/microsoft/BitNet}, 2024.
+\newblock Accessed 2026-05-10.
+
+\bibitem{nvidia-ampere-arch}
+{NVIDIA}.
+\newblock {NVIDIA Ampere Architecture Whitepaper}.
+\newblock
+  \url{https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf},
+  2020.
+
+\bibitem{cublas}
+{NVIDIA}.
+\newblock {cuBLAS}: {NVIDIA} {GPU}-accelerated basic linear algebra
+  subroutines.
+\newblock \url{https://docs.nvidia.com/cuda/cublas/}, 2024.
+
+\bibitem{cuda-dp4a}
+{NVIDIA}.
+\newblock {CUDA C++} programming guide: Simd video instructions.
+\newblock \url{https://docs.nvidia.com/cuda/cuda-c-programming-guide/}, 2024.
+\newblock Accessed 2026-05-10.
+
+\bibitem{swiglu-2020}
+Noam Shazeer.
+\newblock {GLU} variants improve transformer.
+\newblock {\em arXiv preprint arXiv:2002.05202}, 2020.
+
+\bibitem{rope-2024}
+Jianlin Su, Yu~Lu, Shengfeng Pan, Ahmed Murtadha, Bo~Wen, and Yunfeng Liu.
+\newblock {RoFormer}: Enhanced transformer with rotary position embedding.
+\newblock {\em Neurocomputing}, 568, 2024.
+
+\bibitem{ternary-cmos-survey}
+Chetan Vudadha, A.~Surya, Sruthi Agrawal, and M.~B. Srinivas.
+\newblock A survey on ternary logic gate designs in {CMOS} technology.
+\newblock {\em IEEE Access}, 4:7530--7550, 2016.
+
+\bibitem{bitnet-original-2023}
+Hongyu Wang, Shuming Ma, Li~Dong, Shaohan Huang, Huaijie Wang, Lingxiao Ma, Fan
+  Yang, Ruiping Wang, Yi~Wu, and Furu Wei.
+\newblock Bitnet: Scaling 1-bit transformers for large language models.
+\newblock {\em arXiv preprint arXiv:2310.11453}, 2023.
+
+\bibitem{rmsnorm-2019}
+Biao Zhang and Rico Sennrich.
+\newblock Root mean square layer normalization.
+\newblock {\em NeurIPS}, 2019.
+
+\end{thebibliography}
