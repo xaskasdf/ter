@@ -56,8 +56,9 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
 ### Llama 3.2 1B (F6)
 - [x] **F6.1** Q8_0 dequantizer.
 - [x] **F6.2** TritTensor payload Word27→int32 (27× memory reduction).
-- [x] **F6.3** End-to-end Llama 1B forward, 508s/forward AVX2, finite logits
-  in [-10.29, 8.83].
+- [x] **F6.3** End-to-end Llama 1B forward, 508s/forward (pre-AVX2,
+  kernel-routed mm_row), finite logits in [-10.29, 8.83]. Brought down to
+  25.6s/forward by F11.
 - [x] **F6.4** Op-count instrumentation; F8 honest TVMAC counter.
 - [x] **F6.5** Multi-token generation (greedy from BOS).
 
@@ -78,7 +79,7 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
     - OpCounters → flat std::array<uint64_t, 256>
     - KernelTable → flat array (32 slots), no std::unordered_map
 - [x] **F11** AVX2 GEMV in mm_row + -O3 on ter library: 21× speedup on Llama 1B
-  (25.6 s/forward → 1.2 s/forward in best case).
+  (508 s/forward kernel-routed → 25.6 s/forward AVX2 GEMV).
 
 ### CUDA acceleration (F12)
 - [x] **F12.1** mm_row CUDA naive: 21× speedup over Mac AVX2.
