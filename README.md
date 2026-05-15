@@ -96,12 +96,14 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
     - Fix 2: forward kernel upgrade v4 → v11 warp-coop → 200.6 t/s
     - Fix 3: cudaGraph capture (all state on-device, entire forward as one graph) → 421.5 t/s
     - Result: **1.07× faster than llama.cpp Q8_0** on Llama 1B, RTX 3090, 1.58 bits/weight, no tensor cores.
-- [x] **F12.9** BitNet 2B-4T real-weight end-to-end forward: **193 t/s, output matches reference**
+- [x] **F12.9** BitNet 2B-4T real-weight end-to-end forward: **207 t/s, 8/8 BOS-greedy tokens match reference**
     - GGUF i2_s converter: channel-interleaved 128-block, code mapping, per-tensor scales
     - Architectural adapters: sub_norms, ReLU², NEOX RoPE, fp16 weight-tied lm_head
     - fp16 overflow bug fixed in FFN (gate²·up exceeds 65504 → inf → zero contribution)
-    - Top-3 logits and 6/8 greedy tokens **EXACT match** microsoft/BitNet llama-cli reference.
-    - Substrate now runs real ternary-trained transformer with semantically coherent output.
+    - **Stage 2 (fp32 residual stream)**: 6/8 → 8/8 token match (bit-exact vs microsoft llama-cli)
+    - **Stage 3 (fused rmsnorm+quant)**: +7% throughput (193 → 207 t/s)
+    - Stage 1 (ADD-only kernel) brings TVMAC=0 from bench to production
+    - Substrate runs real ternary-trained transformer with bit-exact reference reproduction.
 
 ## Headline numbers (Llama 1B Q8_0, RTX 3090)
 

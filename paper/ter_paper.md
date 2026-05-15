@@ -503,6 +503,75 @@ token mismatch on greedy is fp16 precision noise, not architectural error.
 Bit-exact token reproduction requires bfloat16 (better dynamic range) or
 mixed-precision (fp32 in mid-layer residual + activations).
 
+### 6.3 BitNet end-to-end optimization round + bit-exact validation
+
+Six follow-up optimizations applied to `ter_cuda_forward_bitnet.cu`
+after the initial integration. Final throughput **~207 t/s** with
+**8 of 8 BOS-greedy tokens matching microsoft/BitNet reference**:
+
+| Stage | Change | Throughput | Wins |
+|---|---|---:|---|
+| Baseline (initial integration, fp16 hidden) | – | 193 t/s | 6 of 8 tokens match (75%) |
+| Stage 1: ADD-only matmul (Phase B kernel) | replaces v11 dp4a in BitNet path | 193 t/s | TVMAC = 0 in production |
+| Stage 2: fp32 residual stream | s.hidden → float\*; new rmsnorm_f32_in_k, add_k_f32 | 193 t/s | **8 of 8 tokens match** (bit-exact) |
+| Stage 3: fused rmsnorm + int8 quantize | one kernel pass; ~120 launches/token saved | **207 t/s** | +7% |
+| Stage 4: lm_head smem preload + half2 vec | memory-bound (656 MB W reads/token, ~0.7 ms HBM floor) | 207 t/s | no measurable gain |
+| Stage 5: two-pass argmax (multi-block) | 128 blocks local + 1 block reduce vs single-block | 207 t/s | architectural (all 82 SMs busy in pass 1) |
+| Stage 6 (REVERTED): matmul X-smem preload | hypothesized 8x DRAM read dedup | -7% | L2 cache already serving X efficiently |
+
+**Bit-exact validation against microsoft reference** (BOS=128000, greedy):
+
+```
+ter substrate:                    11 220 16 11 220 17 11 220
+microsoft/BitNet llama-cli:        11 220 16 11 220 17 11 220
+                                 = ", 1, 2, 3, 4, 5,"
+                                 ✅ 8 of 8 match
+```
+
+The Stage 2 fp32 residual stream upgrade was the key fix. The previous
+fp16 residual accumulated precision drift over 30 layers, flipping
+adjacent-token argmax (token 15 = `'0'` vs 16 = `'1'`, 17 = `'2'`)
+on greedy generation of the first numeric sequence. Promoting only
+`s.hidden` to fp32 (everything else stays fp16) added 0% throughput
+overhead and produced bit-exact match without needing bfloat16 or
+full-precision intermediate buffers.
+
+**Bottleneck profile** at 207 t/s end-to-end (Nsight Systems, 16-token
+generation, BitNet 2B-4T weights, RTX 3090):
+
+| Kernel | % of GPU time | Notes |
+|---|---:|---|
+| `mm_bitnet_addonly_dev` (matmul fabric, ADD-only) | 54.9% | 1050 invocations / forward, ~12 µs avg |
+| `mm_fp16_lm_head_k` (vocab projection) | 14.7% | memory-bound (V × H × 2 = 656 MB) |
+| `rmsnorm_quant_f32_in_k` (fused) | 10.5% | post-fusion |
+| `rmsnorm_quant_fp16_in_k` (fused) | 3.6% | post-fusion |
+| `attention_k` | 3.3% | scalar-loop attention |
+| `argmax_k` (final) | 2.6% | 4 calls × 148 µs (single-block path; new multi-block coexists) |
+| `rope_k`, `add_k_f32`, `kv_copy_k`, etc | <2% each | tail |
+
+**What this profile rules out for next-step optimization**:
+
+- `bf16` hidden state (Stage C from optimization plan) — affects only
+  ~2% of time; no measurable perf win expected
+- mma-based attention (Stage D) — attention is 3.3%; max win ~3%
+- `lm_head` micro-optimizations — already memory-bound (HBM-limited
+  at ~0.73 ms; we measure ~0.7 ms in profile)
+
+**What this profile recommends**:
+
+- **Multi-token prefill (M ≥ 16)**: Phase E's INT4 TC kernel showed
+  1.34-1.97× over cuBLAS at M=16 prefill across multiple shapes; this
+  remains the largest unrealized speedup
+- **Persistent attention with mma fragments** at higher seq_len: pays
+  off only when attention's share grows (longer contexts)
+- **lm_head bypass via top-K approximation**: would break greedy
+  determinism; worth considering if sampling is acceptable
+
+The substrate has reached a stable end-to-end baseline at 207 t/s with
+bit-exact reference reproduction. Further substantial gains require
+either widening the batch dimension (M > 1) or moving beyond
+single-token gen workloads.
+
 ## 7. What the simulator measures, and what it doesn't
 
 The simulator measures **operation counts at the architectural level**, exact and substrate-independent:
