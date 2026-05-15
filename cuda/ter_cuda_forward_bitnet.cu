@@ -388,6 +388,48 @@ __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
     if (tid == 0) *out_idx = sidx[0];
 }
 
+// Multi-block argmax. Pass 1: each block finds local (max, idx) for its
+// chunk of N elements. Pass 2: 1 block reduces local results to global.
+// Eliminates the single-block bottleneck in argmax_k where 81 SMs sit idle.
+__global__ void argmax_local_k(const __half* logits, float* part_max, int* part_idx, int N) {
+    extern __shared__ float smem[];
+    int* sidx = (int*)(smem + blockDim.x);
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int chunk = (N + gridDim.x - 1) / gridDim.x;
+    int start = bid * chunk;
+    int end = min(N, start + chunk);
+    float best = -1e30f; int bi = -1;
+    for (int i = start + tid; i < end; i += blockDim.x) {
+        float v = __half2float(logits[i]);
+        if (v > best) { best = v; bi = i; }
+    }
+    smem[tid] = best; sidx[tid] = bi;
+    __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+        if (tid<s && smem[tid+s]>smem[tid]) { smem[tid]=smem[tid+s]; sidx[tid]=sidx[tid+s]; }
+        __syncthreads();
+    }
+    if (tid == 0) { part_max[bid] = smem[0]; part_idx[bid] = sidx[0]; }
+}
+
+__global__ void argmax_final_k(const float* part_max, const int* part_idx, int* out_idx, int n_parts) {
+    extern __shared__ float smem[];
+    int* sidx = (int*)(smem + blockDim.x);
+    int tid = threadIdx.x;
+    float best = -1e30f; int bi = -1;
+    for (int i = tid; i < n_parts; i += blockDim.x) {
+        if (part_max[i] > best) { best = part_max[i]; bi = part_idx[i]; }
+    }
+    smem[tid] = best; sidx[tid] = bi;
+    __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+        if (tid<s && smem[tid+s]>smem[tid]) { smem[tid]=smem[tid+s]; sidx[tid]=sidx[tid+s]; }
+        __syncthreads();
+    }
+    if (tid == 0) *out_idx = sidx[0];
+}
+
 // ---------- The packed matmul: int8 X * packed-trit W -> fp16 out ----------
 // Replaces cublasGemmEx INT8 + dequant. Per-tensor scale folded in here.
 // BitNet ADD-only kernel for ternary {-1, 0, +1} weights. Replaces __dp4a
@@ -540,6 +582,10 @@ struct Scratch {
     int *next_token;
     int *pos_dev;        // device-resident position counter (graph-capture friendly)
     int *token_id_dev;   // device-resident current token id (chained from argmax)
+    // Two-pass argmax scratch (multi-block local + final reduce). 128 blocks
+    // -> all 82 SMs busy at pass 1.
+    float *argmax_part_max;
+    int   *argmax_part_idx;
 };
 
 static void fill_random_packed(uint8_t* d, size_t bytes, std::mt19937& rng) {
@@ -726,6 +772,8 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
     CK(cudaMalloc(&s.next_token, sizeof(int)));
     CK(cudaMalloc(&s.pos_dev, sizeof(int)));
     CK(cudaMalloc(&s.token_id_dev, sizeof(int)));
+    CK(cudaMalloc(&s.argmax_part_max, 128 * sizeof(float)));
+    CK(cudaMalloc(&s.argmax_part_idx, 128 * sizeof(int)));
 }
 
 static void mm_packed_dispatch(const int8_t* X, const float* scale_x_dev, const WPK& W,
@@ -799,7 +847,13 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         mm_fp16_lm_head_k<<<blocks, WARPS_PER_BLOCK * 32, lm_smem, st>>>(
             s.x_norm, m.token_embd, s.logits, c.H, c.V);
     }
-    argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
+    // Two-pass argmax: 128 blocks find local (max, idx), 1 block reduces.
+    // Replaces single-block argmax that left 81 SMs idle (~150 µs -> ~5 µs).
+    constexpr int ARGMAX_PARTS = 128;
+    argmax_local_k<<<ARGMAX_PARTS, 256, 256*(sizeof(float)+sizeof(int)), st>>>(
+        s.logits, s.argmax_part_max, s.argmax_part_idx, c.V);
+    argmax_final_k<<<1, 128, 128*(sizeof(float)+sizeof(int)), st>>>(
+        s.argmax_part_max, s.argmax_part_idx, s.token_id_dev, ARGMAX_PARTS);
     inc_pos_k<<<1, 1, 0, st>>>(s.pos_dev);
 }
 
