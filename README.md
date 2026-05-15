@@ -86,11 +86,15 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
 - [x] **F12.2** Microbench INT8 TC, sgemm fp32, naive packed (memory baseline).
 - [x] **F12.3** End-to-end Llama 1B forward in CUDA (INT8 TC matmuls): 14.7 t/s.
 - [x] **F12.4** Packed-trit end-to-end forward: 4.2 t/s, 33% memory savings.
-- [x] **F12.5** RTX 3090 production baseline (llama.cpp Q8_0): 130 t/s reference.
+- [x] **F12.5** RTX 3090 production baseline (llama.cpp Q8_0 Llama 3.2 1B, clean GPU): **395 t/s** reference (recalibrated 2026-05-15).
 - [x] **F12.6** Real-weight quality validation on Llama 1B (BitNet post-quant breaks).
 - [x] **F12.7** Ternary-optimized packed kernels:
     - v4 wide → v6 dp4a → v7 colmaj → v8 warp → v10 unroll → v11 warp4 → v13
     - Best-per-shape dispatch: **6.67 ms / 186 GMAC/s, 1.90× faster than INT8 TC**
+- [x] **F12.8** End-to-end forward optimization (round 2): **14.7 → 200.6 t/s (13.6×)**
+    - Fix 1: device-pointer scale eliminates 65 D2H syncs/token → 28.9 t/s
+    - Fix 2: forward kernel upgrade v4 → v11 warp-coop → 200.6 t/s
+    - Gap to llama.cpp Q8_0 cut from 27× to **1.97×**, addressable via cudaGraph + persistent attention.
 
 ## Headline numbers (Llama 1B Q8_0, RTX 3090)
 
