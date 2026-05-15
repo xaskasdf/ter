@@ -639,27 +639,27 @@ int main(int argc, char** argv) {
     std::printf("  ter sim packed-trit Llama 1B (forward_packed)    : 421 t/s = 2.37 ms/token (cudaGraph, May 2026)\n");
     std::printf("  llama.cpp Q8_0 (Llama 3.2 1B, RTX 3090 clean GPU): 395 t/s = 2.53 ms/token (real ref, May 2026)\n");
 
-    // Token generation trace: dump first 16 generated token IDs from the
-    // chained graph (each forward's argmax writes to s.token_id_dev which
-    // feeds the next forward's embed lookup).
-    int tok_log[16] = {0};
+    // Final token + diagnostic trace from multiple starting tokens
     int tok_now;
     CK(cudaMemcpy(&tok_now, s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
     std::printf("\nFinal token after %d gens: %d\n", n_gen, tok_now);
 
-    // Re-run a short generation trace from a known starting point to log tokens.
-    // BitNet 2B-4T uses Llama 3 tokenizer with BOS=128000.
-    int reset_pos = 0, reset_tok = 128000;
-    CK(cudaMemcpy(s.pos_dev,      &reset_pos, sizeof(int), cudaMemcpyHostToDevice));
-    CK(cudaMemcpy(s.token_id_dev, &reset_tok, sizeof(int), cudaMemcpyHostToDevice));
-    for (int t = 0; t < 16 && t < m.cfg.Smax - 1; ++t) {
-        CK(cudaGraphLaunch(graph_exec, stream));
-        CK(cudaStreamSynchronize(stream));
-        CK(cudaMemcpy(&tok_log[t], s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
+    // Try multiple starting tokens to see if model is input-dependent or stuck.
+    int start_toks[] = {128000, 2, 100, 1000, 50000};
+    for (int si = 0; si < 5; ++si) {
+        int reset_pos = 0, reset_tok = start_toks[si];
+        CK(cudaMemcpy(s.pos_dev,      &reset_pos, sizeof(int), cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(s.token_id_dev, &reset_tok, sizeof(int), cudaMemcpyHostToDevice));
+        int trace[8] = {0};
+        for (int t = 0; t < 8; ++t) {
+            CK(cudaGraphLaunch(graph_exec, stream));
+            CK(cudaStreamSynchronize(stream));
+            CK(cudaMemcpy(&trace[t], s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
+        }
+        std::printf("From tok=%6d: ", start_toks[si]);
+        for (int t = 0; t < 8; ++t) std::printf("%6d ", trace[t]);
+        std::printf("\n");
     }
-    std::printf("First 16 generated token IDs (from token_id=1, pos=0): ");
-    for (int t = 0; t < 16; ++t) std::printf("%d ", tok_log[t]);
-    std::printf("\n");
 
     cudaGraphExecDestroy(graph_exec);
     cudaGraphDestroy(graph);
