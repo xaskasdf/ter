@@ -572,6 +572,47 @@ bit-exact reference reproduction. Further substantial gains require
 either widening the batch dimension (M > 1) or moving beyond
 single-token gen workloads.
 
+### 6.4 Prefill projection: BitNet 2B-4T matmul fabric at M=16, M=64
+
+To quantify the prefill ceiling, we extended `cuda/ter_cuda_hybrid_dispatch.cu`
+with BitNet 2B-4T shapes (H=2560, F=6912, n_layers=30) and ran the
+matmul fabric at M ∈ {1, 16, 64} on RTX 3090 (clean GPU, 50 iters/shape).
+This isolates the matmul-fabric contribution from attention scaling,
+quantifying the theoretical compute ceiling for prefill workloads:
+
+| Regime | All-cuBLAS INT8 TC | HYBRID dispatch | Speedup | Best kernel |
+|---|---:|---:|---:|---|
+| BitNet M=1 (gen)         | 5.49 ms | 2.90 ms | **1.90×** | v11 packed (7/7 shapes) |
+| BitNet M=16 (small prefill) | 8.36 ms | 3.88 ms | **2.15×** | INT4 TC naive (7/7 shapes) |
+| BitNet M=64 (medium prefill) | 9.12 ms | 8.80 ms | 1.04× | INT8 TC dominates (5/7) |
+
+**Interpretation**:
+- M=1 gen result (1.90×) matches Llama 1B at M=1 (1.92×) — consistent
+  cross-model behavior of the substrate at single-token latency regime.
+- M=16 prefill: **2.15× speedup** via INT4 TC naive kernel from Phase E.
+  Per-token-effective throughput in matmul fabric: 16 / 3.88 ms ≈
+  **4,100 tokens/s** (matmul only, not full forward).
+- M=64: hybrid dispatch is marginal (1.04×) — at this batch size
+  cuBLAS INT8 TC saturates and our INT4 TC kernels need GEMM-tiled
+  variants to win. Phase E's `mm_int4_tc_tiled` partial fix shows
+  promise here; full optimization is future work.
+
+**End-to-end prefill projection**: a real BitNet 2B-4T prefill at M=16
+with attention + lm_head + norms factored in (assuming attention scales
+linearly with M for prefill, dominated by softmax) would land at roughly
+2000-3000 effective tokens/s — substantial speedup over the 207 t/s
+generation regime. End-to-end prefill kernel implementation is left as
+future work; the matmul-fabric ceiling here is the upper bound it
+would target.
+
+The unrealized prefill speedup is the substrate's largest open
+optimization. Production engines (vLLM, TensorRT-LLM) achieve high
+prefill throughput precisely by leveraging tensor cores at M ≥ 16.
+Our hybrid dispatch shows the substrate is not architecturally
+disqualified from this regime — INT4 TC delivers the same wins for
+ternary weights as for general INT4, and the architectural toolkit
+(packed-trit at M=1, INT4 TC at M=16) gives correct per-shape choice.
+
 ## 7. What the simulator measures, and what it doesn't
 
 The simulator measures **operation counts at the architectural level**, exact and substrate-independent:

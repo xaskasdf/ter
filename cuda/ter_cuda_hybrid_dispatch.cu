@@ -387,10 +387,27 @@ int main(int argc, char** argv) {
         {"lm_head",  4096, 128256, 1},
     };
 
+    // BitNet 2B-4T: H=2560, F=6912, layers=30, Hkv=5*128=640, V=128256
+    // Shapes match microsoft/bitnet-b1.58-2B-4T GGUF, weight-tied lm_head
+    // (treated as packed-trit for comparison purposes; in reality lm_head
+    // uses tied F16 token_embd which our hybrid kernel can't dispatch on).
+    Shape mats_bitnet[] = {
+        {"Wq",       2560,  2560, 30},
+        {"Wk",       2560,   640, 30},
+        {"Wv",       2560,   640, 30},
+        {"Wo",       2560,  2560, 30},
+        {"Wgate",    2560,  6912, 30},
+        {"Wup",      2560,  6912, 30},
+        {"Wdown",    6912,  2560, 30},
+    };
+
     run_model("Llama 3.2 1B", 1, mats_1b, 8, n_iters, cublas);
     run_model("Llama 3.2 1B", 16, mats_1b, 8, n_iters, cublas);
     run_model("Llama 3.1 8B", 1, mats_8b, 8, n_iters, cublas);
     run_model("Llama 3.1 8B", 16, mats_8b, 8, n_iters, cublas);
+    run_model("BitNet 2B-4T", 1,  mats_bitnet, 7, n_iters, cublas);
+    run_model("BitNet 2B-4T", 16, mats_bitnet, 7, n_iters, cublas);
+    run_model("BitNet 2B-4T", 64, mats_bitnet, 7, n_iters, cublas);
 
     cublasDestroy(cublas);
     return 0;
