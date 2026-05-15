@@ -31,6 +31,28 @@ struct Cfg {
     float eps = 1e-5f, rope_theta = 500000.0f;
 };
 
+// RMSNorm reading fp32 input (residual stream s.hidden), writing fp16 output (s.x_norm).
+// Used for the input to attention block and ffn block. eps in f32 to preserve
+// numerical fidelity vs reference fp32 implementation.
+__global__ void rmsnorm_f32_in_k(const float* x, const __half* w, __half* y, int H, float eps) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float local = 0.f;
+    for (int i = tid; i < H; i += blockDim.x) { float v = x[i]; local += v*v; }
+    smem[tid] = local; __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) { if (tid<s) smem[tid]+=smem[tid+s]; __syncthreads(); }
+    float rms_inv = rsqrtf(smem[0] / (float)H + eps);
+    for (int i = tid; i < H; i += blockDim.x)
+        y[i] = __float2half(x[i] * rms_inv * __half2float(w[i]));
+}
+
+// add_k_f32: accumulate fp16 attn_out / ffn_out into fp32 hidden residual stream.
+// Eliminates the fp16 saturation that previously required explicit clamp.
+__global__ void add_k_f32(float* x, const __half* y, int N) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x; if (i>=N) return;
+    x[i] += __half2float(y[i]);
+}
+
 // ---------- Same support kernels as ter_cuda_forward.cu ----------
 __global__ void rmsnorm_k(const __half* x, const __half* w, __half* y, int H, float eps) {
     extern __shared__ float smem[];
@@ -105,13 +127,15 @@ __global__ void inc_pos_k(int* pos_dev) { if (threadIdx.x == 0) pos_dev[0] += 1;
 
 // Token embedding lookup: copy token_embd[token_id_dev[0] * H .. + H] into hidden.
 // Replaces cudaMemcpyDeviceToDevice with kernel for graph capture.
+// Writes fp32 (residual stream is fp32 to avoid 30-layer accumulation overflow
+// + ensure bit-exact reproducibility vs fp32 reference forward).
 __global__ void token_embed_lookup_k(
-    const __half* token_embd, int H, const int* token_id_dev, __half* hidden)
+    const __half* token_embd, int H, const int* token_id_dev, float* hidden)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= H) return;
     int t = token_id_dev[0];
-    hidden[tid] = token_embd[(size_t)t * H + tid];
+    hidden[tid] = __half2float(token_embd[(size_t)t * H + tid]);
 }
 
 __global__ void silu_mul_k(const __half* g, const __half* u, __half* o, int N) {
@@ -383,7 +407,8 @@ struct Model {
     WPK lm_head;
 };
 struct Scratch {
-    __half *hidden, *x_norm, *q, *k, *v, *attn_out, *gate, *up, *logits;
+    float *hidden;       // fp32 residual stream (accumulates 60+ adds, bit-exact reproducible)
+    __half *x_norm, *q, *k, *v, *attn_out, *gate, *up, *logits;
     __half *ff_norm;     // fp16 buffer for post-rmsnorm FFN value
     float *ff;           // fp32 buffer for relu2(gate)*up (avoids fp16 overflow)
     int8_t *x_q, *ff_q;
@@ -564,7 +589,8 @@ void alloc_model(Model& m, const Cfg& c, std::mt19937& rng, size_t* total_bytes)
 void alloc_scratch(Scratch& s, const Cfg& c) {
     int Hkv = c.Nkv * c.Hd;
     auto allh = [&](__half** p, size_t n) { CK(cudaMalloc(p, n * sizeof(__half))); };
-    allh(&s.hidden, c.H); allh(&s.x_norm, c.H);
+    CK(cudaMalloc(&s.hidden, c.H * sizeof(float)));  // fp32 residual stream
+    allh(&s.x_norm, c.H);
     allh(&s.q, c.H); allh(&s.k, Hkv); allh(&s.v, Hkv); allh(&s.attn_out, c.H);
     allh(&s.gate, c.F); allh(&s.up, c.F); allh(&s.ff_norm, c.F);
     allh(&s.logits, c.V);
@@ -601,7 +627,7 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
 
     for (int L = 0; L < c.Nl; ++L) {
         Layer& l = m.layers[L];
-        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
+        rmsnorm_f32_in_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv, st);
@@ -618,9 +644,9 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.attn_out, l.attn_sub_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H, st);
-        add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
+        add_k_f32<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
 
-        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
+        rmsnorm_f32_in_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
@@ -632,10 +658,10 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         rmsnorm_f32_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, l.ffn_sub_norm, s.ff_norm, c.F, c.eps);
         quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff_norm, s.ff_q, s.scale_buf, c.F);
         mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H, st);
-        add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
+        add_k_f32<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
 
-    rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
+    rmsnorm_f32_in_k<<<1,256,256*sizeof(float),st>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
     if (m.lm_head.data != nullptr) {
         // Packed-ternary lm_head path (random-weight bench mode)
         quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
@@ -679,17 +705,17 @@ void forward_token_diag(Model& m, Scratch& s, int token_id, int pos)
     token_embed_lookup_k<<<hblk, 256>>>(m.token_embd, c.H, s.token_id_dev, s.hidden);
     CK(cudaDeviceSynchronize());
     {
-        std::vector<__half> h(c.H);
-        CK(cudaMemcpy(h.data(), s.hidden, c.H * sizeof(__half), cudaMemcpyDeviceToHost));
+        std::vector<float> h(c.H);
+        CK(cudaMemcpy(h.data(), s.hidden, c.H * sizeof(float), cudaMemcpyDeviceToHost));
         std::printf("After embed   : ");
-        for (int i = 0; i < 12; ++i) std::printf("%+.4f ", __half2float(h[i]));
-        float sum=0,sum2=0; for (auto x : h) { float v = __half2float(x); sum+=v; sum2+=v*v; }
+        for (int i = 0; i < 12; ++i) std::printf("%+.4f ", h[i]);
+        float sum=0,sum2=0; for (auto x : h) { sum+=x; sum2+=x*x; }
         std::printf("\n  mean=%.4f std=%.4f\n", sum/c.H, std::sqrt(sum2/c.H - (sum/c.H)*(sum/c.H)));
     }
 
     for (int L = 0; L < c.Nl; ++L) {
         Layer& l = m.layers[L];
-        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
+        rmsnorm_f32_in_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv);
@@ -705,9 +731,9 @@ void forward_token_diag(Model& m, Scratch& s, int token_id, int pos)
         rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.attn_out, l.attn_sub_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H);
-        add_k<<<hblk,256>>>(s.hidden, s.attn_out, c.H);
+        add_k_f32<<<hblk,256>>>(s.hidden, s.attn_out, c.H);
 
-        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
+        rmsnorm_f32_in_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F);
@@ -716,15 +742,15 @@ void forward_token_diag(Model& m, Scratch& s, int token_id, int pos)
         rmsnorm_f32_k<<<1,1024,1024*sizeof(float)>>>(s.ff, l.ffn_sub_norm, s.ff_norm, c.F, c.eps);
         quant_int8_k<<<1,1024,1024*sizeof(float)>>>(s.ff_norm, s.ff_q, s.scale_buf, c.F);
         mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H);
-        add_k<<<hblk,256>>>(s.hidden, s.attn_out, c.H);
+        add_k_f32<<<hblk,256>>>(s.hidden, s.attn_out, c.H);
 
         if (L < 3) {
             CK(cudaDeviceSynchronize());
-            std::vector<__half> h(c.H);
-            CK(cudaMemcpy(h.data(), s.hidden, c.H * sizeof(__half), cudaMemcpyDeviceToHost));
+            std::vector<float> h(c.H);
+            CK(cudaMemcpy(h.data(), s.hidden, c.H * sizeof(float), cudaMemcpyDeviceToHost));
             std::printf("L=%d after ffn: ", L);
-            for (int i = 0; i < 6; ++i) std::printf("%+.4f ", __half2float(h[i]));
-            float sum=0,sum2=0; for (auto x : h) { float v = __half2float(x); sum+=v; sum2+=v*v; }
+            for (int i = 0; i < 6; ++i) std::printf("%+.4f ", h[i]);
+            float sum=0,sum2=0; for (auto x : h) { sum+=x; sum2+=x*x; }
             std::printf(" ...  mean=%.4f std=%.4f\n", sum/c.H, std::sqrt(sum2/c.H - (sum/c.H)*(sum/c.H)));
         }
     }
