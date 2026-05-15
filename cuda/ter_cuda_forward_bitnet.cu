@@ -123,16 +123,39 @@ __global__ void silu_mul_k(const __half* g, const __half* u, __half* o, int N) {
 
 // BitNet 2B-4T uses ReLU squared (relu2) as FFN activation (per HF
 // config.json hidden_act). Computes: out = relu2(gate) * up = max(0, gate)^2 * up.
-__global__ void relu2_mul_k(const __half* g, const __half* u, __half* o, int N) {
+// CRITICAL: result magnitude can be ~few * 1e4 (gate~50, gate^2~2500, * up~50 = 1.25e5)
+// which OVERFLOWS fp16 (max 65504). The overflow -> inf propagates through
+// the subsequent rmsnorm (rms becomes inf, rms_inv 0 -> output 0), killing
+// FFN contribution. Solution: write output as fp32 (caller must read as fp32).
+__global__ void relu2_mul_k(const __half* g, const __half* u, float* o, int N) {
     int i = blockIdx.x*blockDim.x + threadIdx.x; if (i>=N) return;
     float gv = __half2float(g[i]), uv = __half2float(u[i]);
     float r = gv > 0.f ? gv * gv : 0.f;
-    o[i] = __float2half(r * uv);
+    o[i] = r * uv;
+}
+
+// RMSNorm with fp32 input (for post-relu2_mul FFN intermediate), fp16 output.
+__global__ void rmsnorm_f32_k(const float* x, const __half* w, __half* y, int H, float eps) {
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    float local = 0.f;
+    for (int i = tid; i < H; i += blockDim.x) { float v = x[i]; local += v*v; }
+    smem[tid] = local; __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) { if (tid<s) smem[tid]+=smem[tid+s]; __syncthreads(); }
+    float rms_inv = rsqrtf(smem[0] / (float)H + eps);
+    for (int i = tid; i < H; i += blockDim.x)
+        y[i] = __float2half(x[i] * rms_inv * __half2float(w[i]));
 }
 
 __global__ void add_k(__half* x, const __half* y, int N) {
     int i = blockIdx.x*blockDim.x + threadIdx.x; if (i>=N) return;
-    x[i] = __float2half(__half2float(x[i]) + __half2float(y[i]));
+    // Clamp to fp16 range to prevent inf accumulation in residual stream.
+    // BitNet 2B-4T residuals can grow > 65504 by layer 20+ (Python shows
+    // stddev 1000+ by layer 2, much larger by layer 29). Without clamp,
+    // any single inf propagates through rmsnorm -> NaN logits.
+    float r = __half2float(x[i]) + __half2float(y[i]);
+    r = fmaxf(fminf(r, 65504.f), -65504.f);
+    x[i] = __float2half(r);
 }
 
 __global__ void attention_k(
@@ -292,7 +315,9 @@ struct Model {
     WPK lm_head;
 };
 struct Scratch {
-    __half *hidden, *x_norm, *q, *k, *v, *attn_out, *gate, *up, *ff, *logits;
+    __half *hidden, *x_norm, *q, *k, *v, *attn_out, *gate, *up, *logits;
+    __half *ff_norm;     // fp16 buffer for post-rmsnorm FFN value
+    float *ff;           // fp32 buffer for relu2(gate)*up (avoids fp16 overflow)
     int8_t *x_q, *ff_q;
     float *scale_buf;
     __half *K_cache, *V_cache;
@@ -415,19 +440,15 @@ bool load_model_from_bin(Model& m, const char* path, size_t* total_bytes)
             CK(cudaMalloc(&w.w->data, bytes));
             w.w->bytes = bytes;
             read_to_device(fp, w.w->data, bytes, staging);
-            // Read per-tensor i2_scale from microsoft converter's trailer.
-            // BUT: empirically the BitNet 2B-4T attn_norm/sub_norm gammas
-            // are very small (~0.01-0.02), suggesting they ABSORB the
-            // weight scale. Applying ws again would double-count.
-            // Tentative override: ignore stored scale, use 1.0 (gammas
-            // handle the magnitude). If FFN matmuls still need scaling,
-            // a per-matmul override could re-enable for those tensors.
+            // Per-tensor i2_scale from microsoft converter's trailer.
+            // (Earlier I thought gammas absorbed this -- WRONG. Python
+            // reference uses the actual stored scale and matches reference
+            // output bit-exact. Override removed.)
             float scale;
             if (std::fread(&scale, sizeof(float), 1, fp) != 1) {
                 std::fprintf(stderr, "missing scale for layer %u\n", L); std::exit(1);
             }
-            w.w->scale = 1.0f;  // override: gammas already absorb weight scale
-            (void)scale;
+            w.w->scale = scale;
             *total_bytes += bytes + sizeof(float);
         }
     }
@@ -477,8 +498,9 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
     auto allh = [&](__half** p, size_t n) { CK(cudaMalloc(p, n * sizeof(__half))); };
     allh(&s.hidden, c.H); allh(&s.x_norm, c.H);
     allh(&s.q, c.H); allh(&s.k, Hkv); allh(&s.v, Hkv); allh(&s.attn_out, c.H);
-    allh(&s.gate, c.F); allh(&s.up, c.F); allh(&s.ff, c.F);
+    allh(&s.gate, c.F); allh(&s.up, c.F); allh(&s.ff_norm, c.F);
     allh(&s.logits, c.V);
+    CK(cudaMalloc(&s.ff, c.F * sizeof(float)));  // fp32 to avoid relu2_mul overflow
     CK(cudaMalloc(&s.x_q, std::max(c.H, c.F)));
     CK(cudaMalloc(&s.ff_q, c.F));
     CK(cudaMalloc(&s.scale_buf, sizeof(float)));
@@ -535,10 +557,11 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
         int fblocks = (c.F+255)/256;
         // BitNet 2B-4T uses relu2 (not silu) per HF config.json hidden_act.
+        // Output to fp32 s.ff to avoid fp16 overflow (gate^2 * up can exceed 65504).
         relu2_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
-        // BitNet sub-RMSNorm before Wdown (over FFN intermediate of size F)
-        rmsnorm_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, l.ffn_sub_norm, s.ff, c.F, c.eps);
-        quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, s.ff_q, s.scale_buf, c.F);
+        // BitNet sub-RMSNorm reads fp32 s.ff, writes fp16 s.ff_norm
+        rmsnorm_f32_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, l.ffn_sub_norm, s.ff_norm, c.F, c.eps);
+        quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff_norm, s.ff_q, s.scale_buf, c.F);
         mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H, st);
         add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
@@ -569,6 +592,73 @@ int forward_token(Model& m, Scratch& s, int token_id, int pos) {
     int next = 0;
     CK(cudaMemcpy(&next, s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
     return next;
+}
+
+// Diagnostic forward: per-layer hidden state dump for divergence analysis vs
+// a reference (e.g., tools/bitnet_pyfwd.py). Uses default stream (no graph)
+// so we can synchronize and copy intermediate state. Dumps first 12 floats
+// of s.hidden after each layer's residual add.
+void forward_token_diag(Model& m, Scratch& s, int token_id, int pos)
+{
+    const Cfg& c = m.cfg;
+    int Hkv = c.Nkv * c.Hd;
+    int hblk = (c.H + 255) / 256;
+
+    CK(cudaMemcpy(s.token_id_dev, &token_id, sizeof(int), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(s.pos_dev, &pos, sizeof(int), cudaMemcpyHostToDevice));
+
+    token_embed_lookup_k<<<hblk, 256>>>(m.token_embd, c.H, s.token_id_dev, s.hidden);
+    CK(cudaDeviceSynchronize());
+    {
+        std::vector<__half> h(c.H);
+        CK(cudaMemcpy(h.data(), s.hidden, c.H * sizeof(__half), cudaMemcpyDeviceToHost));
+        std::printf("After embed   : ");
+        for (int i = 0; i < 12; ++i) std::printf("%+.4f ", __half2float(h[i]));
+        float sum=0,sum2=0; for (auto x : h) { float v = __half2float(x); sum+=v; sum2+=v*v; }
+        std::printf("\n  mean=%.4f std=%.4f\n", sum/c.H, std::sqrt(sum2/c.H - (sum/c.H)*(sum/c.H)));
+    }
+
+    for (int L = 0; L < c.Nl; ++L) {
+        Layer& l = m.layers[L];
+        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
+        quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wv, s.v, c.H, Hkv);
+        rope_k<<<c.Nh,  c.Hd/2>>>(s.q, c.Nh,  c.Hd, s.pos_dev, c.rope_theta);
+        rope_k<<<c.Nkv, c.Hd/2>>>(s.k, c.Nkv, c.Hd, s.pos_dev, c.rope_theta);
+        int kvb = (Hkv + 255) / 256;
+        kv_copy_k<<<kvb, 256>>>(s.k, s.v, s.K_cache, s.V_cache, L, c.Smax, Hkv, s.pos_dev);
+        size_t cache_off = (size_t)L * c.Smax * Hkv;
+        size_t shmem_max = (c.Smax + c.Hd) * sizeof(float);
+        attention_k<<<c.Nh, 64, shmem_max>>>(s.q, s.K_cache+cache_off, s.V_cache+cache_off,
+            s.attn_out, c.Nh, c.Nkv, c.Hd, s.pos_dev, c.Smax);
+        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.attn_out, l.attn_sub_norm, s.x_norm, c.H, c.eps);
+        quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H);
+        add_k<<<hblk,256>>>(s.hidden, s.attn_out, c.H);
+
+        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
+        quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F);
+        int fblocks = (c.F+255)/256;
+        relu2_mul_k<<<fblocks,256>>>(s.gate, s.up, s.ff, c.F);
+        rmsnorm_f32_k<<<1,1024,1024*sizeof(float)>>>(s.ff, l.ffn_sub_norm, s.ff_norm, c.F, c.eps);
+        quant_int8_k<<<1,1024,1024*sizeof(float)>>>(s.ff_norm, s.ff_q, s.scale_buf, c.F);
+        mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H);
+        add_k<<<hblk,256>>>(s.hidden, s.attn_out, c.H);
+
+        if (L < 3) {
+            CK(cudaDeviceSynchronize());
+            std::vector<__half> h(c.H);
+            CK(cudaMemcpy(h.data(), s.hidden, c.H * sizeof(__half), cudaMemcpyDeviceToHost));
+            std::printf("L=%d after ffn: ", L);
+            for (int i = 0; i < 6; ++i) std::printf("%+.4f ", __half2float(h[i]));
+            float sum=0,sum2=0; for (auto x : h) { float v = __half2float(x); sum+=v; sum2+=v*v; }
+            std::printf(" ...  mean=%.4f std=%.4f\n", sum/c.H, std::sqrt(sum2/c.H - (sum/c.H)*(sum/c.H)));
+        }
+    }
 }
 
 int main(int argc, char** argv) {
@@ -607,6 +697,14 @@ int main(int argc, char** argv) {
     // Warmup with the host-state path (also exercises both code paths)
     for (int t = 0; t < n_warmup; ++t) forward_token(m, s, 1, t);
     CK(cudaDeviceSynchronize());
+
+    // DIAGNOSTIC: per-layer hidden state dump for BOS=128000 pos=0 forward.
+    // Compare to tools/bitnet_pyfwd.py to find first divergent layer.
+    if (bin_path) {
+        std::printf("\n=== Per-layer diagnostic dump (BOS=128000, pos=0) ===\n");
+        forward_token_diag(m, s, 128000, 0);
+        std::printf("=== End diagnostic ===\n\n");
+    }
 
     // Reset device state for the captured graph: pos = n_warmup, token_id = 1
     int init_pos = n_warmup, init_tok = 1;
