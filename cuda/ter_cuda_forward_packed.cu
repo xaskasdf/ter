@@ -156,6 +156,90 @@ __global__ void attention_k(
         out[h*head_dim+d] = __float2half(outv[d]);
 }
 
+// fp16 lm_head matmul for weight-tied transformers (Llama 3.2 1B has tied
+// token_embd / lm_head; lifted from forward_bitnet.cu).
+//   x_norm[H] = post-output_norm hidden (fp16, M=1)
+//   token_embd[V, H] = embedding table (V rows of H fp16)
+//   logits[V] = output (fp16)
+// Memory-bound (V*H*2 bytes per call).
+__global__ void mm_fp16_lm_head_k(
+    const __half* __restrict__ x_norm,
+    const __half* __restrict__ token_embd,
+    __half* __restrict__ logits,
+    int H, int V)
+{
+    extern __shared__ __half smem_x[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    if (H % 2 == 0) {
+        const __half2* x_v = reinterpret_cast<const __half2*>(x_norm);
+        __half2* sx_v = reinterpret_cast<__half2*>(smem_x);
+        for (int i = tid; i < H/2; i += bs) sx_v[i] = x_v[i];
+    } else {
+        for (int i = tid; i < H; i += bs) smem_x[i] = x_norm[i];
+    }
+    __syncthreads();
+
+    int warp_id = tid / 32;
+    int lane = tid & 31;
+    int row = blockIdx.x * (bs / 32) + warp_id;
+    if (row >= V) return;
+
+    const __half* w = token_embd + (size_t)row * H;
+    float acc = 0.f;
+    if (H % 2 == 0) {
+        const __half2* w_v = reinterpret_cast<const __half2*>(w);
+        const __half2* sx_v = reinterpret_cast<const __half2*>(smem_x);
+        for (int k = lane; k < H/2; k += 32) {
+            __half2 a = sx_v[k], b = w_v[k];
+            float2 af = __half22float2(a), bf = __half22float2(b);
+            acc += af.x * bf.x + af.y * bf.y;
+        }
+    } else {
+        for (int k = lane; k < H; k += 32)
+            acc += __half2float(smem_x[k]) * __half2float(w[k]);
+    }
+    for (int o = 16; o > 0; o >>= 1)
+        acc += __shfl_xor_sync(0xffffffff, acc, o);
+    if (lane == 0) logits[row] = __float2half(acc);
+}
+
+// Two-pass argmax: 128 blocks find local (max, idx), 1 block reduces.
+__global__ void argmax_local_k(const __half* logits, float* part_max, int* part_idx, int N) {
+    extern __shared__ float smem[];
+    int* sidx = (int*)(smem + blockDim.x);
+    int tid = threadIdx.x;
+    int gtid = blockIdx.x * blockDim.x + tid;
+    int stride = gridDim.x * blockDim.x;
+    float best = -1e30f; int bi = 0;
+    for (int i = gtid; i < N; i += stride) {
+        float v = __half2float(logits[i]);
+        if (v > best) { best = v; bi = i; }
+    }
+    smem[tid] = best; sidx[tid] = bi;
+    __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+        if (tid < s && smem[tid+s] > smem[tid]) { smem[tid] = smem[tid+s]; sidx[tid] = sidx[tid+s]; }
+        __syncthreads();
+    }
+    if (tid == 0) { part_max[blockIdx.x] = smem[0]; part_idx[blockIdx.x] = sidx[0]; }
+}
+__global__ void argmax_final_k(const float* part_max, const int* part_idx, int* out_idx, int n_parts) {
+    extern __shared__ float smem[];
+    int* sidx = (int*)(smem + blockDim.x);
+    int tid = threadIdx.x;
+    float best = (tid < n_parts) ? part_max[tid] : -1e30f;
+    int bi = (tid < n_parts) ? part_idx[tid] : 0;
+    smem[tid] = best; sidx[tid] = bi;
+    __syncthreads();
+    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+        if (tid < s && smem[tid+s] > smem[tid]) { smem[tid] = smem[tid+s]; sidx[tid] = sidx[tid+s]; }
+        __syncthreads();
+    }
+    if (tid == 0) *out_idx = sidx[0];
+}
+
 __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
     extern __shared__ float smem[];
     int* sidx = (int*)(smem + blockDim.x);
@@ -333,6 +417,7 @@ struct Scratch {
     int *next_token;
     int *pos_dev;        // device-resident position counter (graph-capture friendly)
     int *token_id_dev;   // device-resident current token id (chained from argmax)
+    float *argmax_part_max; int *argmax_part_idx;  // two-pass argmax scratch
 };
 
 static void fill_random_packed(uint8_t* d, size_t bytes, std::mt19937& rng) {
@@ -401,6 +486,8 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
     CK(cudaMalloc(&s.next_token, sizeof(int)));
     CK(cudaMalloc(&s.pos_dev, sizeof(int)));
     CK(cudaMalloc(&s.token_id_dev, sizeof(int)));
+    CK(cudaMalloc(&s.argmax_part_max, 128 * sizeof(float)));
+    CK(cudaMalloc(&s.argmax_part_idx, 128 * sizeof(int)));
 }
 
 static void mm_packed_dispatch(const int8_t* X, const float* scale_x_dev, const WPK& W,
@@ -451,11 +538,132 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
 
-    rmsnorm_quant_fp16_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
-        s.hidden, m.output_norm, s.x_q, s.scale_buf, c.H, c.eps);
-    mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
-    argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
+    if (m.lm_head.data != nullptr) {
+        // Bench mode: random packed-trit lm_head, fused norm+quant, packed matmul.
+        rmsnorm_quant_fp16_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+            s.hidden, m.output_norm, s.x_q, s.scale_buf, c.H, c.eps);
+        mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
+    } else {
+        // Real-weight Llama path: lm_head tied to fp16 token_embd.
+        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(
+            s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
+        constexpr int WARPS_PER_BLOCK = 8;
+        int blocks = (c.V + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        size_t lm_smem = c.H * sizeof(__half);
+        mm_fp16_lm_head_k<<<blocks, WARPS_PER_BLOCK * 32, lm_smem, st>>>(
+            s.x_norm, m.token_embd, s.logits, c.H, c.V);
+    }
+    // Two-pass argmax: 128 blocks local + 1 block reduce.
+    constexpr int ARGMAX_PARTS = 128;
+    argmax_local_k<<<ARGMAX_PARTS, 256, 256*(sizeof(float)+sizeof(int)), st>>>(
+        s.logits, s.argmax_part_max, s.argmax_part_idx, c.V);
+    argmax_final_k<<<1, 128, 128*(sizeof(float)+sizeof(int)), st>>>(
+        s.argmax_part_max, s.argmax_part_idx, s.token_id_dev, ARGMAX_PARTS);
     inc_pos_k<<<1, 1, 0, st>>>(s.pos_dev);
+}
+
+// Read N bytes into a device buffer through host staging.
+static void read_to_device(std::FILE* fp, void* d_ptr, size_t bytes,
+                           std::vector<uint8_t>& staging)
+{
+    if (staging.size() < bytes) staging.resize(bytes);
+    size_t n = std::fread(staging.data(), 1, bytes, fp);
+    if (n != bytes) { std::fprintf(stderr, "short read %zu/%zu\n", n, bytes); std::exit(1); }
+    CK(cudaMemcpy(d_ptr, staging.data(), bytes, cudaMemcpyHostToDevice));
+}
+
+static void read_f32_to_half_device(std::FILE* fp, __half* d_dst, size_t n,
+                                    std::vector<float>& staging,
+                                    std::vector<__half>& staging_h)
+{
+    if (staging.size() < n) staging.resize(n);
+    if (staging_h.size() < n) staging_h.resize(n);
+    size_t got = std::fread(staging.data(), sizeof(float), n, fp);
+    if (got != n) { std::fprintf(stderr, "short read %zu/%zu\n", got, n); std::exit(1); }
+    for (size_t i = 0; i < n; ++i) staging_h[i] = __float2half(staging[i]);
+    CK(cudaMemcpy(d_dst, staging_h.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
+}
+
+// Load Llama 3.2 1B packed-trit weights produced by tools/convert_llama_to_packed.py.
+// Sets m.lm_head.data = nullptr (Llama 3.2 has tied weights → fp16 lm_head path).
+bool load_model_from_bin(Model& m, const char* path, size_t* total_bytes)
+{
+    std::FILE* fp = std::fopen(path, "rb");
+    if (!fp) { std::fprintf(stderr, "Could not open %s\n", path); return false; }
+
+    uint32_t magic, version;
+    std::fread(&magic, 4, 1, fp);
+    std::fread(&version, 4, 1, fp);
+    if (magic != 0x4C4C5254u || version != 1) {
+        std::fprintf(stderr, "Bad magic/version: 0x%08x v%u (expected 'LLRT' v1)\n", magic, version);
+        std::fclose(fp); return false;
+    }
+    uint32_t H, F, Nl, V, Nh, Nkv, Hd, Smax;
+    std::fread(&H, 4, 1, fp); std::fread(&F, 4, 1, fp);
+    std::fread(&Nl, 4, 1, fp); std::fread(&V, 4, 1, fp);
+    std::fread(&Nh, 4, 1, fp); std::fread(&Nkv, 4, 1, fp);
+    std::fread(&Hd, 4, 1, fp); std::fread(&Smax, 4, 1, fp);
+    float rope_theta, eps;
+    std::fread(&rope_theta, 4, 1, fp);
+    std::fread(&eps, 4, 1, fp);
+    std::fseek(fp, 64, SEEK_SET);
+
+    Cfg& c = m.cfg;
+    c.H = H; c.F = F; c.Nl = Nl; c.V = V; c.Nh = Nh; c.Nkv = Nkv;
+    c.Hd = Hd; c.Smax = Smax; c.rope_theta = rope_theta; c.eps = eps;
+    std::printf("Loaded Llama config: H=%d F=%d Nl=%d Nh=%d Nkv=%d Hd=%d V=%d eps=%.2e rope=%.0f\n",
+        H, F, Nl, Nh, Nkv, Hd, V, eps, rope_theta);
+
+    int Hkv = c.Nkv * c.Hd;
+    std::vector<uint8_t> staging;
+    std::vector<float> staging_f;
+    std::vector<__half> staging_h;
+
+    size_t tok_n = (size_t)V * H;
+    CK(cudaMalloc(&m.token_embd, tok_n * sizeof(__half)));
+    read_to_device(fp, m.token_embd, tok_n * sizeof(__half), staging);
+    *total_bytes += tok_n * sizeof(__half);
+
+    CK(cudaMalloc(&m.output_norm, H * sizeof(__half)));
+    read_f32_to_half_device(fp, m.output_norm, H, staging_f, staging_h);
+    *total_bytes += H * sizeof(__half);
+
+    m.layers = new Layer[Nl];
+    for (uint32_t L = 0; L < Nl; ++L) {
+        Layer& l = m.layers[L];
+        // attn_norm + ffn_norm (no sub-norms in Llama)
+        for (auto& [pp, sz] : std::vector<std::pair<__half**, size_t>>{
+            {&l.attn_norm, H}, {&l.ffn_norm, H}})
+        {
+            CK(cudaMalloc(pp, sz * sizeof(__half)));
+            read_f32_to_half_device(fp, *pp, sz, staging_f, staging_h);
+            *total_bytes += sz * sizeof(__half);
+        }
+        struct WS { WPK* w; int K, N; };
+        WS ws[] = {
+            {&l.Wq, H, H},   {&l.Wk, H, Hkv}, {&l.Wv, H, Hkv}, {&l.Wo, H, H},
+            {&l.Wgate, H, F}, {&l.Wup, H, F}, {&l.Wdown, F, H},
+        };
+        for (auto& w : ws) {
+            size_t bytes = (size_t)w.K * (w.N / 4);
+            CK(cudaMalloc(&w.w->data, bytes));
+            w.w->bytes = bytes;
+            read_to_device(fp, w.w->data, bytes, staging);
+            float scale;
+            if (std::fread(&scale, sizeof(float), 1, fp) != 1) {
+                std::fprintf(stderr, "missing scale L=%u\n", L); std::exit(1);
+            }
+            w.w->scale = scale;
+            *total_bytes += bytes + sizeof(float);
+        }
+    }
+    // Tied lm_head: forward_token_dev branches to fp16 mm against token_embd.
+    m.lm_head.data = nullptr;
+    m.lm_head.bytes = 0;
+    m.lm_head.scale = 0.0f;
+
+    std::fclose(fp);
+    return true;
 }
 
 // Backward-compat wrapper: takes host token/pos, writes to device, runs forward,
@@ -471,24 +679,43 @@ int forward_token(Model& m, Scratch& s, int token_id, int pos) {
 
 int main(int argc, char** argv) {
     int n_gen = (argc > 1) ? std::atoi(argv[1]) : 32;
+    const char* bin_path = (argc > 2) ? argv[2] : nullptr;
     int n_warmup = 4;
 
     cudaDeviceProp prop; CK(cudaGetDeviceProperties(&prop, 0));
     std::printf("Device: %s\n", prop.name);
 
-    Cfg c;
-    std::printf("Llama 1B: H=%d F=%d L=%d Nh=%d Nkv=%d Hd=%d V=%d Smax=%d\n",
-        c.H, c.F, c.Nl, c.Nh, c.Nkv, c.Hd, c.V, c.Smax);
-    std::printf("Weights: 1.58 bits/elem packed (4 trits/byte)\n");
-
     std::mt19937 rng(42);
     Model m;
     size_t total_bytes = 0;
-    alloc_model(m, c, rng, &total_bytes);
-    Scratch s; alloc_scratch(s, c);
+    if (bin_path) {
+        std::printf("Loading Llama weights from %s...\n", bin_path);
+        if (!load_model_from_bin(m, bin_path, &total_bytes)) return 1;
+        std::printf("Weights loaded.\n");
+    } else {
+        Cfg c;
+        std::printf("Llama 1B: H=%d F=%d L=%d Nh=%d Nkv=%d Hd=%d V=%d Smax=%d (random weights)\n",
+            c.H, c.F, c.Nl, c.Nh, c.Nkv, c.Hd, c.V, c.Smax);
+        std::printf("Weights: 1.58 bits/elem packed (4 trits/byte)\n");
+        alloc_model(m, c, rng, &total_bytes);
+    }
+    Scratch s; alloc_scratch(s, m.cfg);
 
-    std::printf("Total VRAM for weights: %.2f MB (vs INT8 baseline ~1180 MB)\n",
-        total_bytes / (1024.0*1024.0));
+    std::printf("Total VRAM for weights: %.2f MB\n", total_bytes / (1024.0*1024.0));
+
+    // Real-weight diag mode: print N greedy tokens from BOS=128000, no bench.
+    if (bin_path) {
+        std::vector<int> toks;
+        int tok = 128000;  // Llama 3 BOS
+        for (int p = 0; p < n_gen; ++p) {
+            tok = forward_token(m, s, tok, p);
+            toks.push_back(tok);
+        }
+        std::printf("\nGreedy tokens from BOS=128000 (n_gen=%d):\n", n_gen);
+        for (size_t i = 0; i < toks.size(); ++i) std::printf(" %d", toks[i]);
+        std::printf("\n");
+        return 0;
+    }
 
     // Warmup with the host-state path (also exercises both code paths)
     for (int t = 0; t < n_warmup; ++t) forward_token(m, s, 1, t);
