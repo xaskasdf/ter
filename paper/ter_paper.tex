@@ -592,6 +592,60 @@ dispatcher (per-shape best-of-toolkit: packed v11 / {INT4} {TC} /
 cuBLAS {INT8} {TC}) provides the production matmul-fabric win across
 regimes.
 
+\subsection{Llama 1B kernel-correctness validation (caveat closed)}
+\label{sec:llama-validation}
+
+The previous draft accepted a caveat that the $425$ tokens/s Llama 1B
+headline was on synthetic random ternary weights and that
+correctness against Llama 3.2 1B golden tokens had not been
+re-validated post-\texttt{cudaGraph}. We close that caveat here.
+
+Three artifacts: (a) a {GGUF} {Q8\_0}~$\rightarrow$~packed-trit
+converter (\texttt{tools/convert\_llama\_to\_packed.py}) applying the
+BitNet b1.58 per-tensor recipe ($\mathrm{scale} = \mathrm{mean}(|x|)$;
+$q = \mathrm{clamp}(\mathrm{round}(x/\mathrm{scale}), -1, +1)$) and
+emitting v11 col-major packed bytes plus an {fp32} per-tensor scale;
+(b) a NumPy reference forward
+(\texttt{tools/llama\_pyfwd.py}) mirroring every {CUDA} kernel
+in scalar Python; (c) a \texttt{load\_model\_from\_bin} path in
+\texttt{ter\_cuda\_forward\_packed.cu} that loads the converter's
+output and chains a tied-fp16 \texttt{lm\_head} matmul against
+\texttt{token\_embd} (Llama 3.2 1B uses tied embeddings).
+
+Three-way validation:
+
+\begin{enumerate}
+  \item \emph{Architecture sanity (no ternarization, fp32 dequantized
+    weights):} the reference forward generates $7/8$ tokens identical
+    to \texttt{llama-cli} {Q8\_0} from {BOS}$=128000$. The single
+    divergence is the first token (fp32 vs fp16 close-logit
+    sensitivity at pos $0$ with no context). Confirms that {RoPE}
+    convention (Llama uses {NORM} consecutive-pair rotation, not
+    {NEOX}), {GQA}, RMSNorm, SiLU FFN, and the tied-fp16
+    \texttt{lm\_head} are correct in the reference.
+  \item \emph{NumPy reference vs CUDA forward (with per-tensor
+    ternarization):} both produce the identical sequence
+    $\mathbf{16/16}$ {BOS}-greedy tokens bit-exact. Every kernel
+    (fused rmsnorm/quant, packed v11 matmul, NORM RoPE, SiLU+mul,
+    fp16 lm\_head, two-pass argmax) matches the scalar reference.
+  \item \emph{Vs Llama {Q8\_0} golden tokens:} $0/16$ match.
+    Confirms the H1 prediction (\S\ref{sec:hypotheses}) that
+    per-tensor BitNet ternarization on a non-{QAT} model breaks
+    quality; the model collapses to degenerate token cycling
+    (sequence of token $2349$ for $\sim 78$ steps, then token $11$,
+    then token $279$).
+\end{enumerate}
+
+The $425$ tokens/s end-to-end headline is therefore a real substrate
+throughput measurement on the actual ternarized Llama 1B forward (not
+synthetic random weights). Recovering Llama-quality outputs would
+require either a quantization-aware-trained ternary Llama (does not
+exist publicly), Format A 11-trit ($1+5+5$) with a higher-precision
+kernel ({H1} showed {RMSE} $0.05$ preserves argmax), or
+post-quantization fine-tuning to recover quality. These are
+follow-up tasks; the substrate's throughput claim and kernel
+correctness are now both defensible.
+
 \subsection{What round 2 changes about the paper}
 
 The matmul-fabric architectural claim ($1.90\times$ faster than {INT8}

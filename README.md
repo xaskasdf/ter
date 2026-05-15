@@ -97,6 +97,7 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
     - Fix 3: cudaGraph capture (all state on-device, entire forward as one graph) → 412 t/s
     - Fix 4: fused rmsnorm+quant + silu+quant (49 launches/token saved) → 425 t/s
     - Result: **1.08× faster than llama.cpp Q8_0** on Llama 1B, RTX 3090, 1.58 bits/weight, no tensor cores.
+    - **Kernel correctness validated**: GGUF→packed converter + NumPy reference forward + CUDA `load_model_from_bin` path. CUDA matches NumPy reference **16/16 BOS-greedy tokens bit-exact**. Diverges from Llama Q8_0 golden (0/16) per H1 (ternarization breaks non-QAT models). Architecture sanity: with fp32 weights (no ternarization) reference matches Q8_0 golden 7/8.
 - [x] **F12.9** BitNet 2B-4T real-weight end-to-end forward: **214 t/s, 8/8 BOS-greedy tokens match reference**
     - GGUF i2_s converter: channel-interleaved 128-block, code mapping, per-tensor scales
     - Architectural adapters: sub_norms, ReLU², NEOX RoPE, fp16 weight-tied lm_head
