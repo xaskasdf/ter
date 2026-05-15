@@ -320,20 +320,51 @@ __global__ void attention_k(
 //   x_norm[H] = post-output_norm hidden state (fp16, M=1)
 //   token_embd[V, H] = embedding table stored row-major (V rows of H fp16)
 //   logits[V] = output (fp16)
-// One warp per output vocab position. Warp-cooperative K-reduction over H.
+// Optimizations:
+//  - x_norm preloaded into shared memory ONCE per block (was re-read by
+//    every warp).
+//  - __half2 vectorized inner loop (2 muls per iteration).
+// Note: this kernel is memory-bound (V*H*2 = 656 MB reads per call for
+// V=128256, H=2560; HBM-limited around 0.7 ms on RTX 3090). Multi-output-
+// per-warp variants tested but blocked by register pressure.
 __global__ void mm_fp16_lm_head_k(
     const __half* __restrict__ x_norm,
     const __half* __restrict__ token_embd,
     __half* __restrict__ logits,
     int H, int V)
 {
-    int v = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
+    extern __shared__ __half smem_x[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    if (H % 2 == 0) {
+        const __half2* x_v = reinterpret_cast<const __half2*>(x_norm);
+        __half2* sx_v = reinterpret_cast<__half2*>(smem_x);
+        int n2 = H / 2;
+        for (int i = tid; i < n2; i += bs) sx_v[i] = x_v[i];
+    } else {
+        for (int i = tid; i < H; i += bs) smem_x[i] = x_norm[i];
+    }
+    __syncthreads();
+
+    int v = blockIdx.x * (bs / 32) + (tid / 32);
     if (v >= V) return;
-    int lane = threadIdx.x & 31;
+    int lane = tid & 31;
     const __half* row = token_embd + (size_t)v * H;
     float acc = 0.f;
-    for (int k = lane; k < H; k += 32) {
-        acc += __half2float(x_norm[k]) * __half2float(row[k]);
+    if (H % 2 == 0) {
+        const __half2* row_v = reinterpret_cast<const __half2*>(row);
+        const __half2* sx_v = reinterpret_cast<const __half2*>(smem_x);
+        int n2 = H / 2;
+        for (int k = lane; k < n2; k += 32) {
+            __half2 a = sx_v[k], b = row_v[k];
+            float2 af = __half22float2(a), bf = __half22float2(b);
+            acc += af.x * bf.x + af.y * bf.y;
+        }
+    } else {
+        for (int k = lane; k < H; k += 32) {
+            acc += __half2float(smem_x[k]) * __half2float(row[k]);
+        }
     }
     for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o);
     if (lane == 0) logits[v] = __float2half(acc);
@@ -761,9 +792,11 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
     } else {
         // Real BitNet path: lm_head is tied to F16 token_embd. fp16 matmul.
         // grid.x = V / (warps_per_block), block = 8 warps * 32 = 256 threads
+        // Shared mem: H halves for x_norm preload (5120 bytes for H=2560).
         constexpr int WARPS_PER_BLOCK = 8;
         int blocks = (c.V + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-        mm_fp16_lm_head_k<<<blocks, WARPS_PER_BLOCK * 32, 0, st>>>(
+        size_t lm_smem = c.H * sizeof(__half);
+        mm_fp16_lm_head_k<<<blocks, WARPS_PER_BLOCK * 32, lm_smem, st>>>(
             s.x_norm, m.token_embd, s.logits, c.H, c.V);
     }
     argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
