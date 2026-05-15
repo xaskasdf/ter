@@ -519,6 +519,9 @@ after the initial integration. Final throughput **~207 t/s** with
 | Stage 5: two-pass argmax (multi-block) | 128 blocks local + 1 block reduce vs single-block | 207 t/s | architectural (all 82 SMs busy in pass 1) |
 | Stage 6 (REVERTED): matmul X-smem preload | hypothesized 8x DRAM read dedup | -7% | L2 cache already serving X efficiently |
 
+Final clean-GPU end-to-end throughput: **211 t/s** (range 208-214 across
+3 consecutive runs), with 8/8 BOS-greedy tokens bit-exact vs reference.
+
 **Bit-exact validation against microsoft reference** (BOS=128000, greedy):
 
 ```
@@ -582,16 +585,16 @@ quantifying the theoretical compute ceiling for prefill workloads:
 
 | Regime | All-cuBLAS INT8 TC | HYBRID dispatch | Speedup | Best kernel |
 |---|---:|---:|---:|---|
-| BitNet M=1 (gen)         | 5.49 ms | 2.90 ms | **1.90×** | v11 packed (7/7 shapes) |
-| BitNet M=16 (small prefill) | 8.36 ms | 3.88 ms | **2.15×** | INT4 TC naive (7/7 shapes) |
-| BitNet M=64 (medium prefill) | 9.12 ms | 8.80 ms | 1.04× | INT8 TC dominates (5/7) |
+| BitNet M=1 (gen)         | 5.21 ms | 2.90 ms | **1.80×** | v11 packed (6/7), INT8 TC (1 shape: Wk) |
+| BitNet M=16 (small prefill) | 7.58 ms | 3.82 ms | **1.98×** | INT4 TC naive (7/7 shapes) |
+| BitNet M=64 (medium prefill) | 8.95 ms | 8.58 ms | 1.04× | INT8 TC dominates (3/7), INT4 TC (4/7) |
 
 **Interpretation**:
-- M=1 gen result (1.90×) matches Llama 1B at M=1 (1.92×) — consistent
-  cross-model behavior of the substrate at single-token latency regime.
-- M=16 prefill: **2.15× speedup** via INT4 TC naive kernel from Phase E.
-  Per-token-effective throughput in matmul fabric: 16 / 3.88 ms ≈
-  **4,100 tokens/s** (matmul only, not full forward).
+- M=1 gen result (1.80×) is consistent with Llama 1B at M=1 (1.92×) —
+  similar substrate behavior at single-token latency regime.
+- M=16 prefill: **1.98× speedup** via INT4 TC naive kernel from Phase E.
+  Per-token-effective throughput in matmul fabric: 16 / 3.82 ms ≈
+  **4,200 tokens/s** (matmul only, not full forward).
 - M=64: hybrid dispatch is marginal (1.04×) — at this batch size
   cuBLAS INT8 TC saturates and our INT4 TC kernels need GEMM-tiled
   variants to win. Phase E's `mm_int4_tc_tiled` partial fix shows
@@ -622,11 +625,14 @@ shapes at M=16:
 
 | Kernel | One-layer total (7 matmuls) | Per-shape ratio |
 |---|---:|---:|
-| ADD-only batched (TVMAC=0)            | 0.825 ms | 0.27-0.46× cuBLAS |
-| cuBLAS INT8 TC (uses tensor cores)    | 0.305 ms | 1× ref |
-| INT4 TC naive (Phase E, hybrid result) | 0.554 ms (estimated from M=16 mats_bitnet) | ~0.55× cuBLAS |
+| ADD-only batched (TVMAC=0)            | 0.679 ms | 0.34-0.48× cuBLAS |
+| cuBLAS INT8 TC (uses tensor cores)    | 0.270 ms | 1× ref |
+| INT4 TC naive (Phase E hybrid)        | 0.127 ms (avg per layer) | ~2× cuBLAS |
 
-**ADD-only batched LOSES throughput at M=16** by ~2.7× to cuBLAS.
+(Clean-GPU re-bench at 200 iters; numbers stable.)
+
+**ADD-only batched LOSES throughput at M=16** by ~2.5× to cuBLAS
+(0.679 ms vs 0.270 ms).
 Reasons:
 - Register pressure: `acc[4][16]` = 64 ints/thread (likely spills to
   local memory on Ampere; spill traffic eats bandwidth)
