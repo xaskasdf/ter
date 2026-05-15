@@ -53,6 +53,98 @@ __global__ void add_k_f32(float* x, const __half* y, int N) {
     x[i] += __half2float(y[i]);
 }
 
+// FUSED RMSNorm + int8 quantize. One kernel pass replaces the rmsnorm
+// + quantize_int8 pair. Saves a kernel launch + DRAM round-trip on the
+// intermediate normalized values (held in shared memory instead).
+// Shared mem layout: smem[0..H-1] = normalized fp32 values (carried
+// from pass 2 to pass 3), smem[H..H+blockDim-1] = reduction scratch.
+//
+// Two specializations: fp32 input (residual stream) and fp16 input
+// (attention output). Both produce int8 + per-tensor fp32 scale.
+__global__ void rmsnorm_quant_f32_in_k(
+    const float* __restrict__ x, const __half* __restrict__ gamma,
+    int8_t* __restrict__ y, float* __restrict__ scale_out,
+    int H, float eps)
+{
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    float local_sum = 0.f;
+    for (int i = tid; i < H; i += bs) { float v = x[i]; local_sum += v * v; }
+    smem[H + tid] = local_sum;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[H + tid] += smem[H + tid + s];
+        __syncthreads();
+    }
+    float rms_inv = rsqrtf(smem[H + 0] / (float)H + eps);
+
+    float local_amax = 0.f;
+    for (int i = tid; i < H; i += bs) {
+        float n = x[i] * rms_inv * __half2float(gamma[i]);
+        smem[i] = n;
+        if (fabsf(n) > local_amax) local_amax = fabsf(n);
+    }
+    smem[H + tid] = local_amax;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[H + tid] = fmaxf(smem[H + tid], smem[H + tid + s]);
+        __syncthreads();
+    }
+    float amax = smem[H + 0] + 1e-9f;
+    float scale = 127.f / amax;
+    if (tid == 0) *scale_out = 1.f / scale;
+
+    for (int i = tid; i < H; i += bs) {
+        int qi = __float2int_rn(smem[i] * scale);
+        if (qi > 127) qi = 127; if (qi < -128) qi = -128;
+        y[i] = (int8_t)qi;
+    }
+}
+
+__global__ void rmsnorm_quant_fp16_in_k(
+    const __half* __restrict__ x, const __half* __restrict__ gamma,
+    int8_t* __restrict__ y, float* __restrict__ scale_out,
+    int H, float eps)
+{
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    float local_sum = 0.f;
+    for (int i = tid; i < H; i += bs) { float v = __half2float(x[i]); local_sum += v * v; }
+    smem[H + tid] = local_sum;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[H + tid] += smem[H + tid + s];
+        __syncthreads();
+    }
+    float rms_inv = rsqrtf(smem[H + 0] / (float)H + eps);
+
+    float local_amax = 0.f;
+    for (int i = tid; i < H; i += bs) {
+        float n = __half2float(x[i]) * rms_inv * __half2float(gamma[i]);
+        smem[i] = n;
+        if (fabsf(n) > local_amax) local_amax = fabsf(n);
+    }
+    smem[H + tid] = local_amax;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[H + tid] = fmaxf(smem[H + tid], smem[H + tid + s]);
+        __syncthreads();
+    }
+    float amax = smem[H + 0] + 1e-9f;
+    float scale = 127.f / amax;
+    if (tid == 0) *scale_out = 1.f / scale;
+
+    for (int i = tid; i < H; i += bs) {
+        int qi = __float2int_rn(smem[i] * scale);
+        if (qi > 127) qi = 127; if (qi < -128) qi = -128;
+        y[i] = (int8_t)qi;
+    }
+}
+
 // ---------- Same support kernels as ter_cuda_forward.cu ----------
 __global__ void rmsnorm_k(const __half* x, const __half* w, __half* y, int H, float eps) {
     extern __shared__ float smem[];
@@ -627,8 +719,8 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
 
     for (int L = 0; L < c.Nl; ++L) {
         Layer& l = m.layers[L];
-        rmsnorm_f32_in_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        rmsnorm_quant_f32_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+            s.hidden, l.attn_norm, s.x_q, s.scale_buf, c.H, c.eps);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wv, s.v, c.H, Hkv, st);
@@ -641,22 +733,22 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         attention_k<<<c.Nh, 64, shmem_max, st>>>(s.q, s.K_cache+cache_off, s.V_cache+cache_off,
             s.attn_out, c.Nh, c.Nkv, c.Hd, s.pos_dev, c.Smax);
         // BitNet sub-RMSNorm before Wo (over attention output of size H)
-        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.attn_out, l.attn_sub_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        rmsnorm_quant_fp16_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+            s.attn_out, l.attn_sub_norm, s.x_q, s.scale_buf, c.H, c.eps);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H, st);
         add_k_f32<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
 
-        rmsnorm_f32_in_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        rmsnorm_quant_f32_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+            s.hidden, l.ffn_norm, s.x_q, s.scale_buf, c.H, c.eps);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
         int fblocks = (c.F+255)/256;
         // BitNet 2B-4T uses relu2 (not silu) per HF config.json hidden_act.
         // Output to fp32 s.ff to avoid fp16 overflow (gate^2 * up can exceed 65504).
         relu2_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
-        // BitNet sub-RMSNorm reads fp32 s.ff, writes fp16 s.ff_norm
-        rmsnorm_f32_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, l.ffn_sub_norm, s.ff_norm, c.F, c.eps);
-        quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff_norm, s.ff_q, s.scale_buf, c.F);
+        // FUSED ffn_sub_norm + int8 quant: fp32 ff -> int8 ff_q. Smem (F+1024)*4 bytes.
+        rmsnorm_quant_f32_in_k<<<1,1024,(c.F+1024)*sizeof(float),st>>>(
+            s.ff, l.ffn_sub_norm, s.ff_q, s.scale_buf, c.F, c.eps);
         mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H, st);
         add_k_f32<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
