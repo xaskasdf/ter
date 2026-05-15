@@ -146,13 +146,15 @@ __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
 // ---------- The packed matmul: int8 X * packed-trit W -> fp16 out ----------
 // Replaces cublasGemmEx INT8 + dequant. Per-tensor scale folded in here.
 __global__ void mm_packed_v4(
-    const int8_t*  X, const uint8_t* W, int K, int N, float scale, __half* out)
+    const int8_t*  X, const uint8_t* W, int K, int N,
+    const float* scale_x_dev, float w_scale, __half* out)
 {
     constexpr int K_TILE = 512;
     __shared__ int8_t X_smem[K_TILE];
+    __shared__ float scale_smem;
     int tid = threadIdx.x;
+    if (tid == 0) scale_smem = scale_x_dev[0] * w_scale;
     int j = blockIdx.x * blockDim.x + tid;
-    if (j >= N) return;
     int N_bytes = N / 4;
     int j_byte = j / 4;
     int sub_bit = (j & 3) * 2;
@@ -160,17 +162,19 @@ __global__ void mm_packed_v4(
     for (int k0 = 0; k0 < K; k0 += K_TILE) {
         for (int i = tid; i < K_TILE && k0 + i < K; i += blockDim.x) X_smem[i] = X[k0 + i];
         __syncthreads();
-        int kmax = min(K_TILE, K - k0);
-        for (int kk = 0; kk < kmax; ++kk) {
-            int xv = X_smem[kk];
-            if (xv == 0) continue;
-            uint8_t b = W[(k0 + kk) * N_bytes + j_byte];
-            int t = (b >> sub_bit) & 3;
-            acc += xv * ((t == 1) - (t == 2));
+        if (j < N) {
+            int kmax = min(K_TILE, K - k0);
+            for (int kk = 0; kk < kmax; ++kk) {
+                int xv = X_smem[kk];
+                if (xv == 0) continue;
+                uint8_t b = W[(k0 + kk) * N_bytes + j_byte];
+                int t = (b >> sub_bit) & 3;
+                acc += xv * ((t == 1) - (t == 2));
+            }
         }
         __syncthreads();
     }
-    out[j] = __float2half((float)acc * scale);
+    if (j < N) out[j] = __float2half((float)acc * scale_smem);
 }
 
 // ---------- Model + forward ----------
@@ -260,11 +264,11 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
     CK(cudaMalloc(&s.next_token, sizeof(int)));
 }
 
-static void mm_packed_dispatch(const int8_t* X, float scale_x, const WPK& W,
+static void mm_packed_dispatch(const int8_t* X, const float* scale_x_dev, const WPK& W,
                                __half* out, int K, int N)
 {
     int t = 256, blocks = (N + t - 1) / t;
-    mm_packed_v4<<<blocks, t>>>(X, W.data, K, N, scale_x * W.scale, out);
+    mm_packed_v4<<<blocks, t>>>(X, W.data, K, N, scale_x_dev, W.scale, out);
 }
 
 int forward_token(Model& m, Scratch& s, int token_id, int pos)
@@ -276,46 +280,39 @@ int forward_token(Model& m, Scratch& s, int token_id, int pos)
     for (int L = 0; L < c.Nl; ++L) {
         Layer& l = m.layers[L];
         rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
-        float scale_x;
         quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-        CK(cudaMemcpy(&scale_x, s.scale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-        mm_packed_dispatch(s.x_q, scale_x, l.Wq, s.q, c.H, c.H);
-        mm_packed_dispatch(s.x_q, scale_x, l.Wk, s.k, c.H, Hkv);
-        mm_packed_dispatch(s.x_q, scale_x, l.Wv, s.v, c.H, Hkv);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wv, s.v, c.H, Hkv);
         rope_k<<<c.Nh,  c.Hd/2>>>(s.q, c.Nh,  c.Hd, pos, c.rope_theta);
         rope_k<<<c.Nkv, c.Hd/2>>>(s.k, c.Nkv, c.Hd, pos, c.rope_theta);
         size_t kv_off = ((size_t)L * c.Smax + pos) * Hkv;
-        CK(cudaMemcpy(s.K_cache + kv_off, s.k, Hkv*sizeof(__half), cudaMemcpyDeviceToDevice));
-        CK(cudaMemcpy(s.V_cache + kv_off, s.v, Hkv*sizeof(__half), cudaMemcpyDeviceToDevice));
+        CK(cudaMemcpyAsync(s.K_cache + kv_off, s.k, Hkv*sizeof(__half), cudaMemcpyDeviceToDevice));
+        CK(cudaMemcpyAsync(s.V_cache + kv_off, s.v, Hkv*sizeof(__half), cudaMemcpyDeviceToDevice));
         size_t cache_off = (size_t)L * c.Smax * Hkv;
         int seq_len = pos + 1;
         size_t shmem = (seq_len + c.Hd) * sizeof(float);
         attention_k<<<c.Nh, 64, shmem>>>(s.q, s.K_cache+cache_off, s.V_cache+cache_off,
             s.attn_out, c.Nh, c.Nkv, c.Hd, seq_len, c.Smax);
         quant_int8_k<<<1,256,256*sizeof(float)>>>(s.attn_out, s.x_q, s.scale_buf, c.H);
-        CK(cudaMemcpy(&scale_x, s.scale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-        mm_packed_dispatch(s.x_q, scale_x, l.Wo, s.attn_out, c.H, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H);
         int blocks = (c.H+255)/256;
         add_k<<<blocks,256>>>(s.hidden, s.attn_out, c.H);
 
         rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
         quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-        CK(cudaMemcpy(&scale_x, s.scale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-        mm_packed_dispatch(s.x_q, scale_x, l.Wgate, s.gate, c.H, c.F);
-        mm_packed_dispatch(s.x_q, scale_x, l.Wup,   s.up,   c.H, c.F);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F);
         int fblocks = (c.F+255)/256;
         silu_mul_k<<<fblocks,256>>>(s.gate, s.up, s.ff, c.F);
         quant_int8_k<<<1,1024,1024*sizeof(float)>>>(s.ff, s.ff_q, s.scale_buf, c.F);
-        CK(cudaMemcpy(&scale_x, s.scale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-        mm_packed_dispatch(s.ff_q, scale_x, l.Wdown, s.attn_out, c.F, c.H);
+        mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H);
         add_k<<<blocks,256>>>(s.hidden, s.attn_out, c.H);
     }
 
     rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
-    float scale_x;
     quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-    CK(cudaMemcpy(&scale_x, s.scale_buf, sizeof(float), cudaMemcpyDeviceToHost));
-    mm_packed_dispatch(s.x_q, scale_x, m.lm_head, s.logits, c.H, c.V);
+    mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V);
     argmax_k<<<1,256,256*(sizeof(float)+sizeof(int))>>>(s.logits, s.next_token, c.V);
     int next = 0;
     CK(cudaMemcpy(&next, s.next_token, sizeof(int), cudaMemcpyDeviceToHost));
