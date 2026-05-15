@@ -180,6 +180,85 @@ __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
 // 4 cols per warp via 4 trits/byte, warp-cooperative K reduction via
 // __shfl_xor_sync, __dp4a SIMD inner loop. Same kernel that beat cuBLAS
 // INT8 TC by 1.90x in the matmul-fabric bench.
+// Fused rmsnorm + int8 quantize (fp16 in). Saves a kernel launch per pair.
+// Lifted from ter_cuda_forward_bitnet.cu (Stage 3 fusion).
+__global__ void rmsnorm_quant_fp16_in_k(
+    const __half* __restrict__ x, const __half* __restrict__ gamma,
+    int8_t* __restrict__ y, float* __restrict__ scale_out,
+    int H, float eps)
+{
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    float local_sum = 0.f;
+    for (int i = tid; i < H; i += bs) { float v = __half2float(x[i]); local_sum += v * v; }
+    smem[H + tid] = local_sum;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[H + tid] += smem[H + tid + s];
+        __syncthreads();
+    }
+    float rms_inv = rsqrtf(smem[H + 0] / (float)H + eps);
+
+    float local_amax = 0.f;
+    for (int i = tid; i < H; i += bs) {
+        float n = __half2float(x[i]) * rms_inv * __half2float(gamma[i]);
+        smem[i] = n;
+        if (fabsf(n) > local_amax) local_amax = fabsf(n);
+    }
+    smem[H + tid] = local_amax;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[H + tid] = fmaxf(smem[H + tid], smem[H + tid + s]);
+        __syncthreads();
+    }
+    float amax = smem[H + 0] + 1e-9f;
+    float scale = 127.f / amax;
+    if (tid == 0) *scale_out = 1.f / scale;
+
+    for (int i = tid; i < H; i += bs) {
+        int qi = __float2int_rn(smem[i] * scale);
+        if (qi > 127) qi = 127; if (qi < -128) qi = -128;
+        y[i] = (int8_t)qi;
+    }
+}
+
+// Fused silu(gate) * up + int8 quantize. Saves a kernel launch per pair.
+__global__ void silu_mul_quant_k(
+    const __half* __restrict__ g, const __half* __restrict__ u,
+    int8_t* __restrict__ y, float* __restrict__ scale_out, int F)
+{
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    float local_amax = 0.f;
+    for (int i = tid; i < F; i += bs) {
+        float gv = __half2float(g[i]);
+        float uv = __half2float(u[i]);
+        float sg = gv / (1.f + expf(-gv));   // silu
+        float v = sg * uv;
+        smem[i] = v;
+        if (fabsf(v) > local_amax) local_amax = fabsf(v);
+    }
+    smem[F + tid] = local_amax;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[F + tid] = fmaxf(smem[F + tid], smem[F + tid + s]);
+        __syncthreads();
+    }
+    float amax = smem[F + 0] + 1e-9f;
+    float scale = 127.f / amax;
+    if (tid == 0) *scale_out = 1.f / scale;
+
+    for (int i = tid; i < F; i += bs) {
+        int qi = __float2int_rn(smem[i] * scale);
+        if (qi > 127) qi = 127; if (qi < -128) qi = -128;
+        y[i] = (int8_t)qi;
+    }
+}
+
 __global__ void mm_packed_v4(
     const int8_t*  X, const uint8_t* W_col, int K, int N,
     const float* scale_x_dev, float w_scale, __half* out)
@@ -345,8 +424,8 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
 
     for (int L = 0; L < c.Nl; ++L) {
         Layer& l = m.layers[L];
-        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        rmsnorm_quant_fp16_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+            s.hidden, l.attn_norm, s.x_q, s.scale_buf, c.H, c.eps);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wv, s.v, c.H, Hkv, st);
@@ -362,19 +441,18 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H, st);
         add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
 
-        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        rmsnorm_quant_fp16_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+            s.hidden, l.ffn_norm, s.x_q, s.scale_buf, c.H, c.eps);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
-        int fblocks = (c.F+255)/256;
-        silu_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
-        quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, s.ff_q, s.scale_buf, c.F);
+        silu_mul_quant_k<<<1,1024,(c.F+1024)*sizeof(float),st>>>(
+            s.gate, s.up, s.ff_q, s.scale_buf, c.F);
         mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H, st);
         add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
 
-    rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
-    quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+    rmsnorm_quant_fp16_in_k<<<1,256,(c.H+256)*sizeof(float),st>>>(
+        s.hidden, m.output_norm, s.x_q, s.scale_buf, c.H, c.eps);
     mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
     argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
     inc_pos_k<<<1, 1, 0, st>>>(s.pos_dev);

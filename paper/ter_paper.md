@@ -371,7 +371,8 @@ to 1.07× **ahead** on Llama 1B:
 | v1 baseline (mm_packed_v4 + 65 D2H syncs/token) | 14.7 | 68.2 | 1.00× | 27× behind |
 | + device-pointer scale (eliminates D2H syncs) | 28.9 | 34.6 | 1.97× | 14× behind |
 | + v11 warp-coop kernel (replaces v4) | 200.6 | 4.99 | 13.6× | 1.97× behind |
-| + cudaGraph capture (eliminates per-token CPU pacing) | **421.5** | **2.37** | **28.7×** | **1.07× AHEAD** |
+| + cudaGraph capture (eliminates per-token CPU pacing) | **412** | **2.43** | **28.0×** | **1.04× AHEAD** |
+| + fused rmsnorm+quant + silu+quant (49 launches/token saved) | **434** | **2.30** | **29.5×** | **1.10× AHEAD** |
 
 **Fix 1: device-pointer scale.** The int8 quantization scale was being
 read back to host via `cudaMemcpy(DeviceToHost)` after every
@@ -401,14 +402,28 @@ state on-device, the entire forward (340+ kernel launches) is captured
 once into a `cudaGraph` via `cudaStreamBeginCapture`/`EndCapture` and
 replayed per token. cudaGraph eliminates not just the ~3-5 µs CUDA
 launch latency per kernel but also CPU pacing gaps that prevent the
-GPU from issuing kernels back-to-back. Result: 200.6 → **421.5 t/s**,
-which is **1.07× faster** than llama.cpp Q8_0 production inference.
+GPU from issuing kernels back-to-back. Result: 200.6 → **412 t/s**
+(clean-GPU re-bench: 411-413 across 3 consecutive runs at n_gen=200),
+which is **1.04× faster** than llama.cpp Q8_0 production inference.
 
 The substrate now reaches **end-to-end parity with — slightly ahead of —
 production Q8_0 inference on Llama 3.2 1B at RTX 3090** while using
 only 1.58 bits/weight (vs Q8_0's 8 bits) and no tensor cores at all.
 
-**Caveat:** the 421.5 t/s headline is on synthetic random ternary
+**Fix 4: kernel fusion (transferred from BitNet Stage 3).** The
+`rmsnorm_quant_fp16_in_k` kernel from `ter_cuda_forward_bitnet.cu`
+fuses RMSNorm + int8 quantization into a single block-resident pass
+(reduce sum-of-squares → normalize → reduce amax → quantize, all in
+one kernel). A complementary `silu_mul_quant_k` fuses SiLU + multiply
++ quantize for the FFN intermediate. Per layer this saves: 2 launches
+(attn-input + ffn-input rmsnorm/quant pairs) + 1 launch (silu+quant
+pair) = 3 launches × 16 layers + 1 (lm_head output_norm/quant) = **49
+fewer kernel launches per token**. Result on clean GPU best-of-N:
+412 → **434 t/s**, **+5%**. The remaining gap to BitNet's larger
++7% Stage 3 gain is explained by Llama 1B having half the layers
+(16 vs 30) and fewer fusable pairs per layer (3 vs 6).
+
+**Caveat:** the 434 t/s headline is on synthetic random ternary
 weights with `Smax=64` (the maximum captured-graph attention horizon).
 Correctness against Llama 3.2 1B golden tokens has not been
 re-validated post-kernel-swap and post-cudaGraph; this requires:
