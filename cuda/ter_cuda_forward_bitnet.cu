@@ -285,6 +285,112 @@ void alloc_packed(WPK& w, int K, int N, std::mt19937& rng) {
     w.scale = 0.05f;
 }
 
+// Read N bytes from FILE* into a device buffer. Used by load_model_from_bin.
+static void read_to_device(std::FILE* fp, void* d_ptr, size_t bytes,
+                           std::vector<uint8_t>& staging)
+{
+    if (staging.size() < bytes) staging.resize(bytes);
+    size_t n = std::fread(staging.data(), 1, bytes, fp);
+    if (n != bytes) { std::fprintf(stderr, "short read %zu/%zu\n", n, bytes); std::exit(1); }
+    CK(cudaMemcpy(d_ptr, staging.data(), bytes, cudaMemcpyHostToDevice));
+}
+
+// Convert F32 norm weights -> F16 device buffer.
+static void read_f32_to_half_device(std::FILE* fp, __half* d_dst, size_t n,
+                                    std::vector<float>& staging,
+                                    std::vector<__half>& staging_h)
+{
+    if (staging.size() < n) staging.resize(n);
+    if (staging_h.size() < n) staging_h.resize(n);
+    size_t got = std::fread(staging.data(), sizeof(float), n, fp);
+    if (got != n) { std::fprintf(stderr, "short read %zu/%zu\n", got, n); std::exit(1); }
+    for (size_t i = 0; i < n; ++i) staging_h[i] = __float2half(staging[i]);
+    CK(cudaMemcpy(d_dst, staging_h.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
+}
+
+// Load BitNet 2B-4T weights from a packed binary blob produced by
+// tools/convert_bitnet_to_packed.py. Replaces alloc_model when real weights
+// are available. Returns total bytes allocated for tensors.
+bool load_model_from_bin(Model& m, const char* path, size_t* total_bytes)
+{
+    std::FILE* fp = std::fopen(path, "rb");
+    if (!fp) { std::fprintf(stderr, "Could not open %s\n", path); return false; }
+
+    uint32_t magic, version;
+    std::fread(&magic, 4, 1, fp);
+    std::fread(&version, 4, 1, fp);
+    if (magic != 0x54455254u || version != 1) {
+        std::fprintf(stderr, "Bad magic/version: 0x%08x v%u\n", magic, version);
+        std::fclose(fp); return false;
+    }
+    uint32_t H, F, Nl, V, Nh, Nkv, Hd, Smax;
+    std::fread(&H, 4, 1, fp); std::fread(&F, 4, 1, fp);
+    std::fread(&Nl, 4, 1, fp); std::fread(&V, 4, 1, fp);
+    std::fread(&Nh, 4, 1, fp); std::fread(&Nkv, 4, 1, fp);
+    std::fread(&Hd, 4, 1, fp); std::fread(&Smax, 4, 1, fp);
+    float rope_theta, eps;
+    std::fread(&rope_theta, 4, 1, fp);
+    std::fread(&eps, 4, 1, fp);
+    std::fseek(fp, 64, SEEK_SET);  // skip pad to 64-byte header end
+
+    Cfg& c = m.cfg;
+    c.H = H; c.F = F; c.Nl = Nl; c.V = V; c.Nh = Nh; c.Nkv = Nkv;
+    c.Hd = Hd; c.Smax = Smax; c.rope_theta = rope_theta; c.eps = eps;
+    std::printf("Loaded config: H=%d F=%d Nl=%d Nh=%d Nkv=%d Hd=%d V=%d eps=%.2e rope=%.0f\n",
+        H, F, Nl, Nh, Nkv, Hd, V, eps, rope_theta);
+
+    int Hkv = c.Nkv * c.Hd;
+    std::vector<uint8_t> staging;
+    std::vector<float> staging_f;
+    std::vector<__half> staging_h;
+
+    // token_embd (F16)
+    size_t tok_n = (size_t)V * H;
+    CK(cudaMalloc(&m.token_embd, tok_n * sizeof(__half)));
+    read_to_device(fp, m.token_embd, tok_n * sizeof(__half), staging);
+    *total_bytes += tok_n * sizeof(__half);
+
+    // output_norm (F32 -> F16)
+    CK(cudaMalloc(&m.output_norm, H * sizeof(__half)));
+    read_f32_to_half_device(fp, m.output_norm, H, staging_f, staging_h);
+    *total_bytes += H * sizeof(__half);
+
+    m.layers = new Layer[Nl];
+    for (uint32_t L = 0; L < Nl; ++L) {
+        Layer& l = m.layers[L];
+        for (auto& [pp, sz] : std::vector<std::pair<__half**, size_t>>{
+            {&l.attn_norm,     H}, {&l.ffn_norm, H},
+            {&l.attn_sub_norm, H}, {&l.ffn_sub_norm, F}})
+        {
+            CK(cudaMalloc(pp, sz * sizeof(__half)));
+            read_f32_to_half_device(fp, *pp, sz, staging_f, staging_h);
+            *total_bytes += sz * sizeof(__half);
+        }
+        struct WS { WPK* w; int K, N; };
+        WS ws[] = {
+            {&l.Wq, H, H},   {&l.Wk, H, Hkv}, {&l.Wv, H, Hkv}, {&l.Wo, H, H},
+            {&l.Wgate, H, F}, {&l.Wup, H, F}, {&l.Wdown, F, H},
+        };
+        for (auto& w : ws) {
+            size_t bytes = (size_t)w.K * (w.N / 4);
+            CK(cudaMalloc(&w.w->data, bytes));
+            w.w->bytes = bytes;
+            w.w->scale = 1.0f;  // real BitNet weights: scale absorbed into sub_norms
+            read_to_device(fp, w.w->data, bytes, staging);
+            *total_bytes += bytes;
+        }
+    }
+    // lm_head: tied to token_embd (F16). We don't pack it here; final
+    // matmul against tied F16 embeddings would need a separate fp16 kernel.
+    // For this validation run we skip lm_head and dump hidden state instead.
+    m.lm_head.data = nullptr;
+    m.lm_head.bytes = 0;
+    m.lm_head.scale = 0.0f;
+
+    std::fclose(fp);
+    return true;
+}
+
 void alloc_model(Model& m, const Cfg& c, std::mt19937& rng, size_t* total_bytes) {
     m.cfg = c;
     int Hkv = c.Nkv * c.Hd;
@@ -386,9 +492,15 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
     }
 
     rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
-    quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-    mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
-    argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
+    if (m.lm_head.data != nullptr) {
+        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
+        argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
+    }
+    // else: real-BitNet path, lm_head is tied to F16 token_embd and needs
+    // an fp16 matmul kernel (not yet implemented). For validation runs,
+    // token_id_dev is updated externally (or held constant) so the graph
+    // can still loop without divergence.
     inc_pos_k<<<1, 1, 0, st>>>(s.pos_dev);
 }
 
@@ -405,21 +517,33 @@ int forward_token(Model& m, Scratch& s, int token_id, int pos) {
 
 int main(int argc, char** argv) {
     int n_gen = (argc > 1) ? std::atoi(argv[1]) : 32;
+    const char* bin_path = (argc > 2) ? argv[2] : nullptr;
     int n_warmup = 4;
 
     cudaDeviceProp prop; CK(cudaGetDeviceProperties(&prop, 0));
     std::printf("Device: %s\n", prop.name);
 
-    Cfg c;
+    Cfg c_default;
     std::printf("BitNet 2B-4T: H=%d F=%d L=%d Nh=%d Nkv=%d Hd=%d V=%d Smax=%d\n",
-        c.H, c.F, c.Nl, c.Nh, c.Nkv, c.Hd, c.V, c.Smax);
+        c_default.H, c_default.F, c_default.Nl, c_default.Nh, c_default.Nkv,
+        c_default.Hd, c_default.V, c_default.Smax);
     std::printf("Weights: 1.58 bits/elem packed (4 trits/byte)\n");
 
     std::mt19937 rng(42);
     Model m;
     size_t total_bytes = 0;
-    alloc_model(m, c, rng, &total_bytes);
-    Scratch s; alloc_scratch(s, c);
+    if (bin_path) {
+        std::printf("Loading real BitNet weights from %s...\n", bin_path);
+        if (!load_model_from_bin(m, bin_path, &total_bytes)) {
+            std::fprintf(stderr, "Load failed; aborting\n"); return 1;
+        }
+        std::printf("Real BitNet weights loaded.\n");
+    } else {
+        m.cfg = c_default;
+        alloc_model(m, m.cfg, rng, &total_bytes);
+        std::printf("(Random ternary weights -- no --bin specified)\n");
+    }
+    Scratch s; alloc_scratch(s, m.cfg);
 
     std::printf("Total VRAM for weights: %.2f MB (vs INT8 baseline ~1180 MB)\n",
         total_bytes / (1024.0*1024.0));
@@ -468,6 +592,31 @@ int main(int argc, char** argv) {
     std::printf("\nReference:\n");
     std::printf("  ter sim packed-trit Llama 1B (forward_packed)    : 421 t/s = 2.37 ms/token (cudaGraph, May 2026)\n");
     std::printf("  llama.cpp Q8_0 (Llama 3.2 1B, RTX 3090 clean GPU): 395 t/s = 2.53 ms/token (real ref, May 2026)\n");
+
+    // Hidden state sanity check: dump first 12 values of final hidden after
+    // last forward. Real weights -> finite non-trivial values. Random
+    // weights -> usually trivial or extreme.
+    std::vector<__half> h_hidden(m.cfg.H);
+    CK(cudaMemcpy(h_hidden.data(), s.hidden, m.cfg.H * sizeof(__half),
+                  cudaMemcpyDeviceToHost));
+    float sum = 0, sum2 = 0, mx = -1e30f, mn = 1e30f;
+    int finite = 0;
+    for (int i = 0; i < m.cfg.H; ++i) {
+        float v = __half2float(h_hidden[i]);
+        if (std::isfinite(v)) { ++finite; sum += v; sum2 += v*v; }
+        if (v > mx) mx = v;
+        if (v < mn) mn = v;
+    }
+    float mean = sum / m.cfg.H, var = sum2 / m.cfg.H - mean * mean;
+    std::printf("\nFinal hidden state stats (H=%d):\n", m.cfg.H);
+    std::printf("  finite count : %d / %d\n", finite, m.cfg.H);
+    std::printf("  mean         : %.4f\n", mean);
+    std::printf("  stddev       : %.4f\n", std::sqrt(std::max(0.f, var)));
+    std::printf("  range        : [%.4f, %.4f]\n", mn, mx);
+    std::printf("  first 12     :");
+    for (int i = 0; i < 12; ++i)
+        std::printf(" %+.3f", __half2float(h_hidden[i]));
+    std::printf("\n");
 
     return 0;
 }
