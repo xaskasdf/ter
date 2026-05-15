@@ -534,9 +534,10 @@ after the initial integration. Final throughput **~207 t/s** with
 | Stage 4: lm_head smem preload + half2 vec | memory-bound (656 MB W reads/token, ~0.7 ms HBM floor) | 207 t/s | no measurable gain |
 | Stage 5: two-pass argmax (multi-block) | 128 blocks local + 1 block reduce vs single-block | 207 t/s | architectural (all 82 SMs busy in pass 1) |
 | Stage 6 (REVERTED): matmul X-smem preload | hypothesized 8x DRAM read dedup | -7% | L2 cache already serving X efficiently |
+| Stage 7: 4-op fusion (relu²+mul+rmsnorm+quant) | replaces 2 kernels with 1; saves 30 launches/token | **214 t/s** | +1.4%; **8/8 bit-exact preserved** |
 
-Final clean-GPU end-to-end throughput: **211 t/s** (range 208-214 across
-3 consecutive runs), with 8/8 BOS-greedy tokens bit-exact vs reference.
+Final clean-GPU end-to-end throughput: **214 t/s** (range 212-214 across
+5 consecutive runs after Stage 7), with 8/8 BOS-greedy tokens bit-exact vs reference.
 
 **Bit-exact validation against microsoft reference** (BOS=128000, greedy):
 

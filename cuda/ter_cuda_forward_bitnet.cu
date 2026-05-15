@@ -250,6 +250,64 @@ __global__ void relu2_mul_k(const __half* g, const __half* u, float* o, int N) {
     o[i] = r * uv;
 }
 
+// FUSED: relu²(gate) * up + RMSNorm + int8 quantize. Replaces three kernels:
+// relu2_mul_k -> rmsnorm_quant_f32_in_k (with ffn_sub_norm). Saves 2 launches
+// per layer (BitNet 2B-4T: 30 layers = 60 launches/token saved).
+// All math in fp32 to avoid fp16 overflow (gate²·up reaches ~1e5).
+// smem layout: [F floats for relu2*up values][bs floats for reductions].
+__global__ void relu2_mul_rmsnorm_quant_k(
+    const __half* __restrict__ g, const __half* __restrict__ u,
+    const __half* __restrict__ gamma,
+    int8_t* __restrict__ y, float* __restrict__ scale_out,
+    int F, float eps)
+{
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int bs = blockDim.x;
+
+    // Pass 1: compute relu²(g)*u in fp32, store in smem, accumulate sum-of-squares.
+    float local_ss = 0.f;
+    for (int i = tid; i < F; i += bs) {
+        float gv = __half2float(g[i]);
+        float uv = __half2float(u[i]);
+        float r = (gv > 0.f) ? (gv * gv) : 0.f;
+        float v = r * uv;
+        smem[i] = v;
+        local_ss += v * v;
+    }
+    smem[F + tid] = local_ss;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[F + tid] += smem[F + tid + s];
+        __syncthreads();
+    }
+    float rms_inv = rsqrtf(smem[F + 0] / (float)F + eps);
+
+    // Pass 2: normalize + apply gamma; track amax for quantization scale.
+    float local_amax = 0.f;
+    for (int i = tid; i < F; i += bs) {
+        float n = smem[i] * rms_inv * __half2float(gamma[i]);
+        smem[i] = n;
+        if (fabsf(n) > local_amax) local_amax = fabsf(n);
+    }
+    smem[F + tid] = local_amax;
+    __syncthreads();
+    for (int s = bs/2; s > 0; s >>= 1) {
+        if (tid < s) smem[F + tid] = fmaxf(smem[F + tid], smem[F + tid + s]);
+        __syncthreads();
+    }
+    float amax = smem[F + 0] + 1e-9f;
+    float scale = 127.f / amax;
+    if (tid == 0) *scale_out = 1.f / scale;
+
+    // Pass 3: quantize.
+    for (int i = tid; i < F; i += bs) {
+        int qi = __float2int_rn(smem[i] * scale);
+        if (qi > 127) qi = 127; if (qi < -128) qi = -128;
+        y[i] = (int8_t)qi;
+    }
+}
+
 // RMSNorm with fp32 input (for post-relu2_mul FFN intermediate), fp16 output.
 __global__ void rmsnorm_f32_k(const float* x, const __half* w, __half* y, int H, float eps) {
     extern __shared__ float smem[];
@@ -821,13 +879,10 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
             s.hidden, l.ffn_norm, s.x_q, s.scale_buf, c.H, c.eps);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
-        int fblocks = (c.F+255)/256;
-        // BitNet 2B-4T uses relu2 (not silu) per HF config.json hidden_act.
-        // Output to fp32 s.ff to avoid fp16 overflow (gate^2 * up can exceed 65504).
-        relu2_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
-        // FUSED ffn_sub_norm + int8 quant: fp32 ff -> int8 ff_q. Smem (F+1024)*4 bytes.
-        rmsnorm_quant_f32_in_k<<<1,1024,(c.F+1024)*sizeof(float),st>>>(
-            s.ff, l.ffn_sub_norm, s.ff_q, s.scale_buf, c.F, c.eps);
+        // FUSED relu²(gate)*up + ffn_sub_norm + int8 quant. Saves 2 launches per layer.
+        // All math in fp32 inside the kernel (no s.ff fp32 buffer needed for this path).
+        relu2_mul_rmsnorm_quant_k<<<1,1024,(c.F+1024)*sizeof(float),st>>>(
+            s.gate, s.up, l.ffn_sub_norm, s.ff_q, s.scale_buf, c.F, c.eps);
         mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H, st);
         add_k_f32<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
