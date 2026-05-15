@@ -13,6 +13,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <algorithm>
+#include <utility>
 #include <vector>
 #include <random>
 #include <chrono>
@@ -67,17 +69,21 @@ __global__ void quant_int8_k(const __half* x, int8_t* y, float* scale_out, int N
 }
 
 __global__ void rope_k(__half* v, int n_heads, int head_dim, const int* pos_dev, float theta) {
+    // BitNet uses LLAMA_ROPE_TYPE_NEOX: rotate pairs (v[k], v[k + head_dim/2])
+    // (NOT consecutive pairs (v[2k], v[2k+1]) as in classic LLaMA / RoPE_NORM)
     int pos = pos_dev[0];
     int h = blockIdx.x;
     int k = threadIdx.x;
-    if (k >= head_dim/2) return;
+    int half = head_dim / 2;
+    if (k >= half) return;
     float freq = 1.0f / powf(theta, (2.0f * k) / (float)head_dim);
     float a = (float)pos * freq;
     float c = cosf(a), s = sinf(a);
-    int idx = h * head_dim + 2*k;
-    float v0 = __half2float(v[idx]), v1 = __half2float(v[idx+1]);
-    v[idx]   = __float2half(v0*c - v1*s);
-    v[idx+1] = __float2half(v0*s + v1*c);
+    int idx0 = h * head_dim + k;        // first half
+    int idx1 = h * head_dim + k + half; // second half (offset by head_dim/2)
+    float v0 = __half2float(v[idx0]), v1 = __half2float(v[idx1]);
+    v[idx0] = __float2half(v0*c - v1*s);
+    v[idx1] = __float2half(v0*s + v1*c);
 }
 
 // Copy K/V into cache at slot [L, pos] -- replaces cudaMemcpy with a kernel
@@ -659,6 +665,41 @@ int main(int argc, char** argv) {
         std::printf("From tok=%6d: ", start_toks[si]);
         for (int t = 0; t < 8; ++t) std::printf("%6d ", trace[t]);
         std::printf("\n");
+    }
+
+    // Top-K logits dump from FIRST forward (BOS=128000, pos=0) for analysis.
+    // Diagnoses whether output collapse is bug vs near-tie context-degenerate.
+    {
+        int reset_pos = 0, reset_tok = 128000;
+        CK(cudaMemcpy(s.pos_dev,      &reset_pos, sizeof(int), cudaMemcpyHostToDevice));
+        CK(cudaMemcpy(s.token_id_dev, &reset_tok, sizeof(int), cudaMemcpyHostToDevice));
+        CK(cudaGraphLaunch(graph_exec, stream));
+        CK(cudaStreamSynchronize(stream));
+
+        // Dump logits to host
+        std::vector<__half> logits(m.cfg.V);
+        CK(cudaMemcpy(logits.data(), s.logits, m.cfg.V * sizeof(__half),
+                      cudaMemcpyDeviceToHost));
+
+        // Find top-10 (logits magnitudes ~few; argmax is the actually-selected token)
+        std::vector<std::pair<float, int>> indexed(m.cfg.V);
+        for (int i = 0; i < m.cfg.V; ++i)
+            indexed[i] = {__half2float(logits[i]), i};
+        std::partial_sort(indexed.begin(), indexed.begin() + 10, indexed.end(),
+            [](const std::pair<float,int>& a, const std::pair<float,int>& b){ return a.first > b.first; });
+
+        std::printf("\nTop-10 logits from BOS=128000 (pos=0):\n");
+        for (int i = 0; i < 10; ++i)
+            std::printf("  %2d. token=%6d  logit=%+.4f\n", i+1, indexed[i].second, indexed[i].first);
+
+        // Also dump some statistics
+        float lmin = 1e30f, lmax = -1e30f, sum = 0;
+        for (int i = 0; i < m.cfg.V; ++i) {
+            float v = __half2float(logits[i]);
+            if (v < lmin) lmin = v; if (v > lmax) lmax = v; sum += v;
+        }
+        std::printf("Logits stats: min=%.4f, max=%.4f, mean=%.4f, gap_top12=%.4f\n",
+            lmin, lmax, sum / m.cfg.V, indexed[0].first - indexed[1].first);
     }
 
     cudaGraphExecDestroy(graph_exec);
