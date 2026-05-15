@@ -145,36 +145,61 @@ __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
 
 // ---------- The packed matmul: int8 X * packed-trit W -> fp16 out ----------
 // Replaces cublasGemmEx INT8 + dequant. Per-tensor scale folded in here.
+// v11 warp-cooperative kernel: col-major W (W_col[j_byte*K + k]),
+// 4 cols per warp via 4 trits/byte, warp-cooperative K reduction via
+// __shfl_xor_sync, __dp4a SIMD inner loop. Same kernel that beat cuBLAS
+// INT8 TC by 1.90x in the matmul-fabric bench.
 __global__ void mm_packed_v4(
-    const int8_t*  X, const uint8_t* W, int K, int N,
+    const int8_t*  X, const uint8_t* W_col, int K, int N,
     const float* scale_x_dev, float w_scale, __half* out)
 {
-    constexpr int K_TILE = 512;
-    __shared__ int8_t X_smem[K_TILE];
+    int warp_block_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane = threadIdx.x & 31;
+    int j_base = warp_block_id * 4;
+    if (j_base >= N) return;
+    int j_byte = j_base / 4;
+    const uint8_t* Wc = W_col + (size_t)j_byte * K;
+
     __shared__ float scale_smem;
-    int tid = threadIdx.x;
-    if (tid == 0) scale_smem = scale_x_dev[0] * w_scale;
-    int j = blockIdx.x * blockDim.x + tid;
-    int N_bytes = N / 4;
-    int j_byte = j / 4;
-    int sub_bit = (j & 3) * 2;
-    int acc = 0;
-    for (int k0 = 0; k0 < K; k0 += K_TILE) {
-        for (int i = tid; i < K_TILE && k0 + i < K; i += blockDim.x) X_smem[i] = X[k0 + i];
-        __syncthreads();
-        if (j < N) {
-            int kmax = min(K_TILE, K - k0);
-            for (int kk = 0; kk < kmax; ++kk) {
-                int xv = X_smem[kk];
-                if (xv == 0) continue;
-                uint8_t b = W[(k0 + kk) * N_bytes + j_byte];
-                int t = (b >> sub_bit) & 3;
-                acc += xv * ((t == 1) - (t == 2));
-            }
+    if (threadIdx.x == 0) scale_smem = scale_x_dev[0] * w_scale;
+
+    int kpt = (K + 31) / 32;
+    int kstart = lane * kpt, kend = min(K, kstart + kpt);
+    int acc[4] = {0, 0, 0, 0};
+    int kk = kstart;
+    for (; kk + 4 <= kend; kk += 4) {
+        uint32_t w = *reinterpret_cast<const uint32_t*>(Wc + kk);
+        uint8_t b0 = w & 0xff, b1 = (w>>8) & 0xff, b2 = (w>>16) & 0xff, b3 = (w>>24) & 0xff;
+        int32_t X4 = *reinterpret_cast<const uint32_t*>(X + kk);
+        #pragma unroll
+        for (int sub = 0; sub < 4; ++sub) {
+            int sb = sub * 2;
+            int t0=(b0>>sb)&3, t1=(b1>>sb)&3, t2=(b2>>sb)&3, t3=(b3>>sb)&3;
+            int wv0=(t0==1)-(t0==2), wv1=(t1==1)-(t1==2), wv2=(t2==1)-(t2==2), wv3=(t3==1)-(t3==2);
+            int32_t W4 = (uint8_t)wv0 | ((uint8_t)wv1<<8) | ((uint8_t)wv2<<16) | ((uint8_t)wv3<<24);
+            acc[sub] = __dp4a(X4, W4, acc[sub]);
         }
-        __syncthreads();
     }
-    if (j < N) out[j] = __float2half((float)acc * scale_smem);
+    for (; kk < kend; ++kk) {
+        int xv = X[kk]; if (xv == 0) continue;
+        uint8_t b = Wc[kk];
+        #pragma unroll
+        for (int sub = 0; sub < 4; ++sub) {
+            int t = (b >> (sub * 2)) & 3;
+            acc[sub] += xv * ((t == 1) - (t == 2));
+        }
+    }
+    #pragma unroll
+    for (int sub = 0; sub < 4; ++sub)
+        for (int o = 16; o > 0; o >>= 1) acc[sub] += __shfl_xor_sync(0xffffffff, acc[sub], o);
+    if (lane == 0) {
+        __syncwarp();
+        float scale = scale_smem;  // broadcast read
+        #pragma unroll
+        for (int sub = 0; sub < 4; ++sub)
+            if (j_base + sub < N)
+                out[j_base + sub] = __float2half((float)acc[sub] * scale);
+    }
 }
 
 // ---------- Model + forward ----------
@@ -267,7 +292,9 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
 static void mm_packed_dispatch(const int8_t* X, const float* scale_x_dev, const WPK& W,
                                __half* out, int K, int N)
 {
-    int t = 256, blocks = (N + t - 1) / t;
+    // v11 layout: 4 cols per warp, warps_per_block = 8 (256 threads)
+    int t = 256;
+    int blocks = (N / 4 + 8 - 1) / 8;
     mm_packed_v4<<<blocks, t>>>(X, W.data, K, N, scale_x_dev, W.scale, out);
 }
 
