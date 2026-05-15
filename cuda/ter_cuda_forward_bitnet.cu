@@ -375,9 +375,16 @@ bool load_model_from_bin(Model& m, const char* path, size_t* total_bytes)
             size_t bytes = (size_t)w.K * (w.N / 4);
             CK(cudaMalloc(&w.w->data, bytes));
             w.w->bytes = bytes;
-            w.w->scale = 1.0f;  // real BitNet weights: scale absorbed into sub_norms
             read_to_device(fp, w.w->data, bytes, staging);
-            *total_bytes += bytes;
+            // Read the per-tensor scale microsoft/BitNet's converter stores
+            // immediately after each i2_s tensor's codes (first fp32 of an
+            // 8-fp32 trailer; our converter writes just the first fp32).
+            float scale;
+            if (std::fread(&scale, sizeof(float), 1, fp) != 1) {
+                std::fprintf(stderr, "missing scale for layer %u\n", L); std::exit(1);
+            }
+            w.w->scale = scale;
+            *total_bytes += bytes + sizeof(float);
         }
     }
     // lm_head: tied to token_embd (F16). We don't pack it here; final

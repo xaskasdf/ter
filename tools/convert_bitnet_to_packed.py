@@ -82,6 +82,14 @@ def get_tensor(name):
             return t
     raise KeyError(name)
 
+def read_i2s_scale(t, fp):
+    """microsoft/BitNet's GGUF i2_s format appends 8 fp32 values (32 bytes)
+    after each tensor's codes. The first fp32 is the per-tensor scale
+    (microsoft's `i2_scale`). The remaining 28 bytes are padding/garbage."""
+    fp.seek(t.data_offset + t.n_bytes)
+    raw = fp.read(4)
+    return struct.unpack('<f', raw)[0]
+
 def i2s_to_col_packed(t):
     """Convert an i2_s tensor (shape [N, K] GGUF row-major) to col-major
     packed-trit (4 cols/byte, K rows): out[j_byte * K + k]."""
@@ -106,8 +114,12 @@ def i2s_to_col_packed(t):
     codes = np.empty((N, K), dtype=np.uint8)
     for shift in range(4):
         codes[:, shift::4] = (raw_2d >> (shift * 2)) & 3
-    # Remap: 3 -> 0 (per dequant_i2_s)
-    codes[codes == 3] = 0
+    # microsoft/BitNet 2B-4T i2_s actual mapping (verified empirically:
+    # code 1 is dominant at ~50%, codes 0 and 2 are balanced at ~25% each,
+    # code 3 is unused). Mapping: 0 -> +1, 1 -> 0, 2 -> -1, 3 -> 0.
+    # Our packed format uses: 0=zero, 1=+1, 2=-1, so:
+    remap = np.array([1, 0, 2, 0], dtype=np.uint8)
+    codes = remap[codes]
     # Now pack col-major: out[j_byte * K + k] holds 4 codes at rows 4*j_byte..4*j_byte+3, col k
     out = np.zeros((N // 4, K), dtype=np.uint8)
     for tr in range(4):
@@ -115,6 +127,8 @@ def i2s_to_col_packed(t):
     return out.flatten()  # shape: (N/4) * K bytes total
 
 print(f"Writing {OUT_PATH}...")
+# Need separate raw file handle to read scales (per-tensor 32-byte trailer)
+src_fp = open(GGUF_PATH, 'rb')
 with open(OUT_PATH, 'wb') as f:
     # Header: 64 bytes
     f.write(struct.pack('<II', 0x54455254, 1))  # magic, version
@@ -159,9 +173,12 @@ with open(OUT_PATH, 'wb') as f:
         ]:
             t = get_tensor(f'blk.{L}.{nm}.weight')
             packed = i2s_to_col_packed(t)
+            scale = read_i2s_scale(t, src_fp)
             assert packed.size == K_in * (N_out // 4), \
                 f"{nm}@L={L}: packed {packed.size} != {K_in * (N_out // 4)}"
+            # Write packed weights then fp32 scale for this tensor
             f.write(packed.tobytes())
+            f.write(struct.pack('<f', scale))
 
         if L % 5 == 0:
             print(f"  layer {L}/{Nl} done")
