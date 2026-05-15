@@ -211,6 +211,89 @@ The end-to-end VRAM for our packed forward implementation is 796 MB (versus 1180
 
 After the v11 / v13 generation, additional variants (v12 branchless decode, v13 deep loop unrolling beyond what the compiler already does) showed worse or marginal results. The compiler optimization of comparison-based decodes was already near-optimal; deeper unrolling helped only on large-N shapes; small-N shapes (`attn_q`, `attn_k`) are limited by parallelism rather than per-thread overhead. Best-per-shape dispatch (selecting v11 or v13 based on N) gave the final 6.67 ms / 186 GMAC/s. We stopped optimizing here: the win is consistent and well-mechanized.
 
+### 5.6 Round 2: BitNet ADD-only, scale, INT4 TC, and hybrid dispatch
+
+After v1 of this paper we extended the kernel toolkit along four axes. The
+results sharpen the architectural story while exposing one important caveat
+about the production baseline.
+
+**Phase B: BitNet ADD-only (`tk_matmul_bitnet`).** For ternary weights `{-1, 0, +1}`,
+matmul collapses to add/sub/skip — multiplication is degenerate. We built a
+specialized kernel using only conditional accumulate (no `__dp4a`, no
+multiply unit invocation). On Llama 1B M=1 fabric:
+
+| Backend | ms / forward | vs INT8 TC | TVMAC/__dp4a count |
+|---|---:|---:|---|
+| v11 (dp4a baseline) | 7.29 | 1.07× | 36.1M `__dp4a` |
+| **BitNet ADD-only** | **5.90** | **1.15×** | **0** |
+| cuBLAS INT8 TC | 6.82 | 1× | n/a |
+
+The kernel structure ensures TVMAC=0 regardless of input data; this is the
+H3 architectural claim **demonstrated in hardware**, not just analytically.
+Combined with v11's 1.90× win, the BitNet stack reaches **2.34×** over INT8
+TC at M=1.
+
+**Phase A: batched M=1, 16 (gen vs prefill regime).** v11 is an M=1
+specialist (warp-cooperative K-reduction). A naive batched extension hit
+register-pressure saturation by M=4. cuBLAS INT8 TC scales 8× per-token
+throughput from M=1 to M=16 (47 → 393 GMAC/s) — the gen regime is where TC
+is underutilized; prefill is where TC saturates. The substrate-data
+alignment win is concentrated in the **latency regime** (single-user chat
+inference); production prefill needs a different kernel design.
+
+**Phase C: scale to Llama 3.1 8B and 70B.** Hypothesis: 4× memory
+compression amplifies wall-clock advantage at larger working sets. Result:
+the architectural memory advantage (4×) holds at all scales; the wall-clock
+ratio does **not** generalize. At 8B M=1 fabric the v11 packed kernel is
+0.82× cuBLAS INT8 TC (loses); at 70B 0.56× (loses more). Per-shape: small-N
+attention projections (Wk, Wv, Wo) actually **improve** in ratio (Wk at 70B:
+13.6×); FFN-expand shapes (Wgate, Wup, Wdown) are where cuBLAS dominates.
+A shape-aware dispatcher is required at 8B+ scales.
+
+**Phase E: INT4 tensor cores via `wmma::s4`.** Ternary `{-1, 0, +1}` packs
+into int4 (4 bits/elem; 1 wasted bit) at the cost of 2× memory density vs
+packed-trit (2 bits/elem), but unlocks Ampere INT4 TC peak (~568 TOPS,
+2× INT8 TC). At M=16 across all measured shapes (1B/8B/70B), an INT4 TC
+kernel beats cuBLAS INT8 TC by 1.34× to 1.97×. A GEMM-tiled variant
+(BM=BN=BK=32, 16 warps/block, shared-memory cooperative loads) further
+improves M=64 throughput 6.3× over the naive INT4 path — though cuBLAS
+INT8 still wins the tightest M=64 FFN-expand shapes pending further tile
+geometry tuning.
+
+**Hybrid dispatch.** Per-shape best-of-toolkit selector across (packed v11,
+INT4 TC naive, INT4 TC tiled, cuBLAS INT8 TC). Total forward equivalent
+matmul-fabric time on RTX 3090:
+
+| Model | M | All-INT8 TC | HYBRID | Speedup | Hybrid wins |
+|---|---:|---:|---:|---:|---|
+| Llama 1B | 1 | 17.0 ms | 7.2 ms | **2.35×** | v11: 8/8 shapes |
+| Llama 1B | 16 | 59.4 ms | 14.5 ms | **4.11×** | INT4 TC: 8/8 |
+| Llama 8B | 1 | 58.3 ms | 42.4 ms | 1.37× | v11: 5/8, INT8: 3/8 |
+| Llama 8B | 16 | 239.7 ms | 110.4 ms | **2.17×** | INT4 TC: 8/8 |
+
+The architectural toolkit beats the all-cuBLAS baseline by **2-4× on Llama
+1B** and **1.4-2.2× on Llama 8B** across both gen (M=1) and small-prefill
+(M=16) regimes — via per-shape kernel selection alone, no fusion or KV
+cache co-design.
+
+**Caveat: production baseline.** Through this paper "INT8 tensor cores"
+means cuBLAS `cublasGemmEx(CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT_TENSOR_OP)`
+with `CUDA_R_8I` operands. **Production llama.cpp does not use this path** —
+it uses ggml's specialized `mmq` (matmul quantized) and `mmvq` (matmul
+vec-quantized) kernels, which are tuned for Q8_0/Q4_K_M weight layouts and
+significantly outperform generic cuBLAS GemmEx at small batch sizes. We
+verified this directionally: llama-bench tg64 on Llama 3.1 8B Q8_0 reports
+46 t/s ± 36 (RTX 3090, shared GPU); the implied full-forward latency
+(~21 ms) is roughly half our matmul-fabric-only number. The "2-4× over
+cuBLAS" headline therefore qualifies the **wrong baseline** for production
+relevance. A direct comparison against ggml mmvq is the correct next
+measurement; without it the wall-clock claims should not be taken to
+position the substrate against deployed inference engines.
+
+The architectural claims (TVMAC=0 demonstrated in hardware, 4× memory
+compression at all scales, hybrid dispatch concept) are independent of the
+baseline choice and stand as substrate-level properties.
+
 ## 6. End-to-end inference: why it's slower than llama.cpp
 
 A separate experiment ran the full Llama 1B forward pipeline (RMSNorm, RoPE, attention, FFN, lm_head, sampling) in CUDA with INT8 tensor core matmuls. Result: 14.7 tokens/s (68 ms/token).
