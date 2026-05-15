@@ -384,8 +384,8 @@ int main(int argc, char** argv) {
     std::printf("ms / token   : %.4f\n", per_tok);
     std::printf("tokens/s     : %.1f\n", 1000.0 / per_tok);
     std::printf("\nReference:\n");
-    std::printf("  ter sim INT8 forward (random weights, 1180 MB) : 14.7 t/s = 68.2 ms/token\n");
-    std::printf("  llama.cpp Q8_0 fp16-TC                          : 130 t/s = 7.7 ms/token\n");
+    std::printf("  ter sim INT8 forward (random weights, 1180 MB)  : 14.7 t/s = 68.2 ms/token (v1, pre-fixes)\n");
+    std::printf("  llama.cpp Q8_0 (Llama 3.2 1B, RTX 3090 clean GPU): 395 t/s = 2.53 ms/token (real ref, May 2026)\n");
 
     return 0;
 }

@@ -345,11 +345,11 @@ matmul-fabric results into deployed-engine wall-clock parity.
 
 ## 6. End-to-end inference: why it's slower than llama.cpp
 
-A separate experiment ran the full Llama 1B forward pipeline (RMSNorm, RoPE, attention, FFN, lm_head, sampling) in CUDA with INT8 tensor core matmuls. Result: 14.7 tokens/s (68 ms/token).
+A separate experiment ran the full Llama 1B forward pipeline (RMSNorm, RoPE, attention, FFN, lm_head, sampling) in CUDA with INT8 tensor core matmuls. Initial result: 14.7 tokens/s (68 ms/token).
 
-Reference: llama.cpp Q8_0 fp16-tensor-core production inference on the same RTX 3090: 130 tokens/s (7.7 ms/token).
+Reference (recalibrated 2026-05-15 with clean exclusive GPU and recent llama.cpp build): llama.cpp Q8_0 production inference on Llama 3.2 1B at the same RTX 3090: **395 tokens/s** (2.53 ms/token). The earlier "130 t/s" reference came from a contended-GPU run and underestimated the production baseline.
 
-The naive end-to-end ternary engine is **9x slower** than production llama.cpp. The gap is **engineering, not architectural**:
+The naive end-to-end ternary engine started **27x slower** than production llama.cpp. The gap is **engineering, not architectural**:
 
 - 200+ device-to-host sync points per token (every `quant_int8` kernel writes the per-tensor scale to host memory before the next `cublasGemmEx` can be queued).
 - 800 kernel launches per token at ~5-10 µs each: several ms of pure launch overhead per token.
@@ -359,6 +359,61 @@ The naive end-to-end ternary engine is **9x slower** than production llama.cpp. 
 llama.cpp represents years of optimization specifically in this direction. A production-quality ternary inference engine adopting the same techniques (kernel fusion, persistent attention, optimized KV cache layout, attention with `mma` intrinsics) could plausibly close the gap to parity or 1.5-2x. That work is outside the scope of this paper.
 
 The matmul-fabric-only result (1.90x faster than INT8 TC) is the defensible architectural claim; we draw a clear line between the fabric (architectural property of the substrate) and the surrounding plumbing (engineering work in any inference engine).
+
+### 6.1 Round-2 end-to-end fixes: closing the gap from 27x to 1.97x
+
+Two architectural fixes applied to `ter_cuda_forward_packed.cu` after the
+matmul-fabric work cut the end-to-end gap to llama.cpp by 13.6×:
+
+| Stage | t/s | ms/token | Cumulative speedup | Gap to llama.cpp 395 t/s |
+|---|---:|---:|---:|---:|
+| v1 baseline (mm_packed_v4 + 65 D2H syncs/token) | 14.7 | 68.2 | 1.00× | 27× behind |
+| + device-pointer scale (eliminates D2H syncs) | 28.9 | 34.6 | **1.97×** | 14× behind |
+| + v11 warp-coop kernel (replaces v4) | **200.6** | **4.99** | **13.6×** | **1.97× behind** |
+
+**Fix 1: device-pointer scale.** The int8 quantization scale was being
+read back to host via `cudaMemcpy(DeviceToHost)` after every
+`quant_int8_k` kernel — 4 times per layer plus once for `lm_head` =
+65 stalls per token. Each stall forces the entire CUDA stream to
+synchronize. The fix: pass `s.scale_buf` as a `const float*` device
+pointer to the matmul kernel, which reads the scale into shared memory
+inside the kernel. K/V cache copies converted to `cudaMemcpyAsync`
+in the same change. Result: 14.7 → 28.9 t/s on Llama 1B random
+weights, RTX 3090 (clean GPU).
+
+**Fix 2: kernel upgrade v4 → v11.** The end-to-end forward was using
+the OLD `mm_packed_v4` kernel (K-tiled shared memory, scalar inner
+loop) — not the v11 warp-cooperative kernel that won the matmul-fabric
+benchmark by 1.90× over cuBLAS INT8 TC. Swapping in v11 (col-major W
+layout, 4 cols per warp, `__shfl_xor_sync` K-reduction, `__dp4a`
+SIMD inner loop) gave another 6.94× speedup. Result: 28.9 → 200.6 t/s.
+
+**Where the remaining ~2× gap is:**
+
+- **Kernel launch overhead.** ~80 launches per token at 3-5 µs each =
+  240-400 µs per token of pure CUDA launch latency. At 5 ms/token total,
+  this is 5-8% — meaningful but not the dominant cost.
+- **No fusion.** RMSNorm + quantize + matmul are still three separate
+  kernels; llama.cpp fuses many of these. ~30% of remaining gap.
+- **Naive attention.** Our attention_k uses 1 block per head with
+  scalar inner loops, no tensor core utilization. llama.cpp's flash
+  attention is much faster.
+- **Per-token overhead.** Some accumulator state (KV cache offsets,
+  position counters) involves CPU-side work per token.
+
+**cudaGraph capture** could amortize the per-token launch overhead and
+likely close another 5-15% of the gap. Persistent attention with `mma`
+fragments could close the rest. With both, end-to-end parity with
+llama.cpp Q8_0 is plausible — and once parity is reached, the
+substrate's architectural advantages (4× memory compression, TVMAC = 0
+for BitNet weights, no tensor core dependency) translate directly to
+energy/silicon advantage in custom hardware.
+
+**Caveat:** the 200.6 t/s number is on synthetic random ternary weights;
+correctness vs Llama 3.2 1B golden tokens has not been re-validated
+post-kernel-swap. The validation requires the GGUF→packed converter to
+emit col-major W (the v11 kernel layout); previously the converter and
+v4 used row-major. Validation is a defined follow-up.
 
 ## 7. What the simulator measures, and what it doesn't
 
