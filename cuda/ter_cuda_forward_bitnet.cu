@@ -243,6 +243,74 @@ __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
 
 // ---------- The packed matmul: int8 X * packed-trit W -> fp16 out ----------
 // Replaces cublasGemmEx INT8 + dequant. Per-tensor scale folded in here.
+// BitNet ADD-only kernel for ternary {-1, 0, +1} weights. Replaces __dp4a
+// with conditional add/sub/skip -- the architectural ideal for BitNet
+// (TVMAC = 0). Same col-major byte layout as v11. Adapted for forward
+// path: device-pointer scale, bounds check on j_base + sub.
+__global__ void mm_bitnet_addonly_dev(
+    const int8_t* X, const uint8_t* W_col, int K, int N,
+    const float* scale_x_dev, float w_scale, __half* out)
+{
+    int warp_block_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane = threadIdx.x & 31;
+    int j_base = warp_block_id * 4;
+    if (j_base >= N) return;
+    int j_byte = j_base / 4;
+    const uint8_t* Wc = W_col + (size_t)j_byte * K;
+
+    __shared__ float scale_smem;
+    if (threadIdx.x == 0) scale_smem = scale_x_dev[0] * w_scale;
+
+    int kpt = (K + 31) / 32;
+    int kstart = lane * kpt, kend = min(K, kstart + kpt);
+    int acc[4] = {0, 0, 0, 0};
+    int kk = kstart;
+    for (; kk + 4 <= kend; kk += 4) {
+        uint32_t w = *reinterpret_cast<const uint32_t*>(Wc + kk);
+        uint8_t b0 = w & 0xff, b1 = (w>>8) & 0xff, b2 = (w>>16) & 0xff, b3 = (w>>24) & 0xff;
+        int32_t X4 = *reinterpret_cast<const uint32_t*>(X + kk);
+        int x0 = (int8_t)(X4 & 0xff);
+        int x1 = (int8_t)((X4 >> 8) & 0xff);
+        int x2 = (int8_t)((X4 >> 16) & 0xff);
+        int x3 = (int8_t)((X4 >> 24) & 0xff);
+        #pragma unroll
+        for (int sub = 0; sub < 4; ++sub) {
+            int sb = sub * 2;
+            int t0=(b0>>sb)&3, t1=(b1>>sb)&3, t2=(b2>>sb)&3, t3=(b3>>sb)&3;
+            // ADD-only: no multiplications.
+            if (t0 == 1)      acc[sub] += x0;
+            else if (t0 == 2) acc[sub] -= x0;
+            if (t1 == 1)      acc[sub] += x1;
+            else if (t1 == 2) acc[sub] -= x1;
+            if (t2 == 1)      acc[sub] += x2;
+            else if (t2 == 2) acc[sub] -= x2;
+            if (t3 == 1)      acc[sub] += x3;
+            else if (t3 == 2) acc[sub] -= x3;
+        }
+    }
+    for (; kk < kend; ++kk) {
+        int xv = X[kk]; if (xv == 0) continue;
+        uint8_t b = Wc[kk];
+        #pragma unroll
+        for (int sub = 0; sub < 4; ++sub) {
+            int t = (b >> (sub * 2)) & 3;
+            if (t == 1)      acc[sub] += xv;
+            else if (t == 2) acc[sub] -= xv;
+        }
+    }
+    #pragma unroll
+    for (int sub = 0; sub < 4; ++sub)
+        for (int o = 16; o > 0; o >>= 1) acc[sub] += __shfl_xor_sync(0xffffffff, acc[sub], o);
+    if (lane == 0) {
+        __syncwarp();
+        float scale = scale_smem;
+        #pragma unroll
+        for (int sub = 0; sub < 4; ++sub)
+            if (j_base + sub < N)
+                out[j_base + sub] = __float2half((float)acc[sub] * scale);
+    }
+}
+
 // v11 warp-cooperative kernel: col-major W (W_col[j_byte*K + k]),
 // 4 cols per warp via 4 trits/byte, warp-cooperative K reduction via
 // __shfl_xor_sync, __dp4a SIMD inner loop. Same kernel that beat cuBLAS
@@ -514,10 +582,11 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
 static void mm_packed_dispatch(const int8_t* X, const float* scale_x_dev, const WPK& W,
                                __half* out, int K, int N, cudaStream_t stream = 0)
 {
-    // v11 layout: 4 cols per warp, warps_per_block = 8 (256 threads)
+    // BitNet 2B-4T weights are ALL ternary by construction -- use ADD-only
+    // (TVMAC=0 architectural ideal, 1.23x faster than v11 dp4a per Phase B).
     int t = 256;
     int blocks = (N / 4 + 8 - 1) / 8;
-    mm_packed_v4<<<blocks, t, 0, stream>>>(X, W.data, K, N, scale_x_dev, W.scale, out);
+    mm_bitnet_addonly_dev<<<blocks, t, 0, stream>>>(X, W.data, K, N, scale_x_dev, W.scale, out);
 }
 
 // All-device forward: pos and token_id read from device pointers, no host
