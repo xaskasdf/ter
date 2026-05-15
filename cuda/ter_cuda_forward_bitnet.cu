@@ -115,6 +115,15 @@ __global__ void silu_mul_k(const __half* g, const __half* u, __half* o, int N) {
     o[i] = __float2half(s * uv);
 }
 
+// BitNet 2B-4T uses ReLU squared (relu2) as FFN activation (per HF
+// config.json hidden_act). Computes: out = relu2(gate) * up = max(0, gate)^2 * up.
+__global__ void relu2_mul_k(const __half* g, const __half* u, __half* o, int N) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x; if (i>=N) return;
+    float gv = __half2float(g[i]), uv = __half2float(u[i]);
+    float r = gv > 0.f ? gv * gv : 0.f;
+    o[i] = __float2half(r * uv);
+}
+
 __global__ void add_k(__half* x, const __half* y, int N) {
     int i = blockIdx.x*blockDim.x + threadIdx.x; if (i>=N) return;
     x[i] = __float2half(__half2float(x[i]) + __half2float(y[i]));
@@ -519,7 +528,8 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F, st);
         mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
         int fblocks = (c.F+255)/256;
-        silu_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
+        // BitNet 2B-4T uses relu2 (not silu) per HF config.json hidden_act.
+        relu2_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
         // BitNet sub-RMSNorm before Wdown (over FFN intermediate of size F)
         rmsnorm_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, l.ffn_sub_norm, s.ff, c.F, c.eps);
         quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, s.ff_q, s.scale_buf, c.F);
@@ -638,8 +648,8 @@ int main(int argc, char** argv) {
     std::printf("\nFinal token after %d gens: %d\n", n_gen, tok_now);
 
     // Re-run a short generation trace from a known starting point to log tokens.
-    // Reset state to (pos=0, token_id=1=BOS approx) and run 16 graph launches.
-    int reset_pos = 0, reset_tok = 1;
+    // BitNet 2B-4T uses Llama 3 tokenizer with BOS=128000.
+    int reset_pos = 0, reset_tok = 128000;
     CK(cudaMemcpy(s.pos_dev,      &reset_pos, sizeof(int), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(s.token_id_dev, &reset_tok, sizeof(int), cudaMemcpyHostToDevice));
     for (int t = 0; t < 16 && t < m.cfg.Smax - 1; ++t) {
