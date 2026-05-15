@@ -262,37 +262,51 @@ geometry tuning.
 
 **Hybrid dispatch.** Per-shape best-of-toolkit selector across (packed v11,
 INT4 TC naive, INT4 TC tiled, cuBLAS INT8 TC). Total forward equivalent
-matmul-fabric time on RTX 3090:
+matmul-fabric time on RTX 3090, exclusive GPU access (200 iters/shape):
 
-| Model | M | All-INT8 TC | HYBRID | Speedup | Hybrid wins |
+| Model | M | All-cuBLAS INT8 TC | HYBRID | Speedup | Hybrid wins |
 |---|---:|---:|---:|---:|---|
-| Llama 1B | 1 | 17.0 ms | 7.2 ms | **2.35×** | v11: 8/8 shapes |
-| Llama 1B | 16 | 59.4 ms | 14.5 ms | **4.11×** | INT4 TC: 8/8 |
-| Llama 8B | 1 | 58.3 ms | 42.4 ms | 1.37× | v11: 5/8, INT8: 3/8 |
-| Llama 8B | 16 | 239.7 ms | 110.4 ms | **2.17×** | INT4 TC: 8/8 |
+| Llama 1B | 1 | 3.11 ms | 2.00 ms | **1.56×** | v11: 8/8 shapes |
+| Llama 1B | 16 | 4.60 ms | 2.27 ms | **2.02×** | INT4 TC: 8/8 |
+| Llama 8B | 1 | 17.15 ms | 13.09 ms | **1.31×** | v11: 5/8, INT8: 3/8 |
+| Llama 8B | 16 | 21.75 ms | 13.00 ms | **1.67×** | INT4 TC: 8/8 |
 
-The architectural toolkit beats the all-cuBLAS baseline by **2-4× on Llama
-1B** and **1.4-2.2× on Llama 8B** across both gen (M=1) and small-prefill
-(M=16) regimes — via per-shape kernel selection alone, no fusion or KV
-cache co-design.
+The architectural toolkit beats the all-cuBLAS baseline by **1.31-2.02×**
+across both gen (M=1) and small-prefill (M=16) regimes — via per-shape
+kernel selection alone, no fusion or KV cache co-design.
 
-**Caveat: production baseline.** Through this paper "INT8 tensor cores"
-means cuBLAS `cublasGemmEx(CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT_TENSOR_OP)`
-with `CUDA_R_8I` operands. **Production llama.cpp does not use this path** —
-it uses ggml's specialized `mmq` (matmul quantized) and `mmvq` (matmul
-vec-quantized) kernels, which are tuned for Q8_0/Q4_K_M weight layouts and
-significantly outperform generic cuBLAS GemmEx at small batch sizes. We
-verified this directionally: llama-bench tg64 on Llama 3.1 8B Q8_0 reports
-46 t/s ± 36 (RTX 3090, shared GPU); the implied full-forward latency
-(~21 ms) is roughly half our matmul-fabric-only number. The "2-4× over
-cuBLAS" headline therefore qualifies the **wrong baseline** for production
-relevance. A direct comparison against ggml mmvq is the correct next
-measurement; without it the wall-clock claims should not be taken to
-position the substrate against deployed inference engines.
+(An earlier run on a contended GPU reported 2.35-4.11×; that variance was
+attributable to cuBLAS INT8 TC suffering more than our packed kernels
+under contention. The clean-GPU numbers above are paper-grade.)
 
-The architectural claims (TVMAC=0 demonstrated in hardware, 4× memory
+**Critical caveat: production baseline is NOT cuBLAS.** Through this paper
+"INT8 tensor cores" means cuBLAS `cublasGemmEx(CUBLAS_COMPUTE_32I,
+CUBLAS_GEMM_DEFAULT_TENSOR_OP)` with `CUDA_R_8I` operands. **Production
+llama.cpp does not use this path** — it uses ggml's specialized `mmq`
+(matmul quantized) and `mmvq` (matmul vec-quantized) kernels, tuned for
+Q8_0/Q4_K_M layouts. Direct measurement on the same RTX 3090 with
+exclusive GPU access:
+
+| Test | llama.cpp Q8_0 t/s | ms/forward |
+|---|---:|---:|
+| Llama 8B tg64 (gen M=1) | **86.15 ± 0.18** | **11.6 ms full forward** |
+| Llama 8B pp64 (prefill) | 2254 ± 660 | 0.44 ms/token |
+
+Our hybrid kernel matmul-fabric for Llama 8B M=1 is **13.09 ms**, which is
+**1.13× slower than llama.cpp's entire full forward** (11.6 ms — including
+attention, RMSNorm, KV cache, and softmax). For prefill M=16 the gap is
+1.84× (matmul-only vs full-forward). The "1.31-2.02× over cuBLAS" headline
+is therefore technically correct but **does not position the substrate
+against deployed inference engines**.
+
+The architectural claims (TVMAC = 0 demonstrated in hardware, 4× memory
 compression at all scales, hybrid dispatch concept) are independent of the
-baseline choice and stand as substrate-level properties.
+baseline choice and stand as substrate-level properties. The wall-clock
+claims relative to production engines remain negative pending: (a) a
+direct ggml-mmvq-equivalent kernel comparison at the matmul-fabric level,
+and (b) end-to-end inference engineering (kernel fusion, persistent
+attention) on top of the substrate primitives. Both are out of scope for
+this paper.
 
 ## 6. End-to-end inference: why it's slower than llama.cpp
 
