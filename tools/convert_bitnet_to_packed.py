@@ -91,46 +91,66 @@ def read_i2s_scale(t, fp):
     return struct.unpack('<f', raw)[0]
 
 def i2s_to_col_packed(t):
-    """Convert microsoft/BitNet WEIGHT_PARALLEL i2_s tensor to our v11
-    col-major packed-trit layout.
+    """Convert microsoft/BitNet i2_s tensor to our v11 col-major packed-trit.
 
-    Microsoft layout (ggml-bitnet-mad.cpp:121-140):
-      - Tensor shape [K=in_features, N=out_features] (gguf-py convention).
-      - Memory is (N//4) outer groups, each containing K bytes.
-      - Byte at index (rg, col) = rg * K + col holds 4 codes from rows
-        {4rg, 4rg+1, 4rg+2, 4rg+3} at column col.
-      - Within byte: q0 (row 4rg+0) at HIGH bits (shift 6), q3 at LOW bits.
-      - Code values: 0=-1, 1=0, 2=+1 (per quantize_i2_s line 71).
+    Microsoft's actual layout (ggml-quants.c dequantize_row_i2_s, line 71 of
+    ggml-bitnet-mad.cpp's quantize_i2_s ACT_PARALLEL branch with QK_I2_S=128):
+      - Tensor is processed in flat row-major order in BLOCKS of 128 elements.
+      - Each 128-element block packs into 32 consecutive bytes.
+      - Byte p in block (p=0..31) holds 4 codes from element positions
+        {p, p+32, p+64, p+96} within the block.
+      - Bit order within byte: position 0 (group 0) at HIGH bits (shift 6),
+        position 96 (group 3) at LOW bits (shift 0).
+      - Code map: 0->-1, 1->0, 2->+1, 3->0.
 
-    Our v11 layout:
-      - W_col[j_byte * K + k] holds 4 codes at output cols
-        {4*j_byte, 4*j_byte+1, 4*j_byte+2, 4*j_byte+3}, input row k.
-      - Bit order (kernel reads sub=0..3 via `(b >> (sub*2)) & 3`):
-        sub=0 (LOW bits) -> output 4*j_byte+0.
-      - Code values: 0=0, 1=+1, 2=-1.
+    Conversion:
+      1. Read raw bytes (total = N*K/4 bytes)
+      2. Reshape blocks of 32 bytes, decode 4 codes per byte to recover the
+         flat (N, K) tensor in row-major.
+      3. Remap codes to our format (0=0, 1=+1, 2=-1).
+      4. Re-pack to our v11 col-major: out[j_byte, k] holds 4 output cols
+         {4*j_byte..4*j_byte+3} at input row k, low bits = first col.
     """
     assert int(t.tensor_type) == 36, f"expected i2_s, got {t.tensor_type}"
     K = int(t.shape[0])
     N = int(t.shape[1])
     assert K % 4 == 0 and N % 4 == 0
     raw = np.array(t.data, copy=False).view(np.uint8)
-    assert raw.size == N * K // 4
+    total = N * K
+    assert raw.size == total // 4, f"bytes {raw.size} != {total//4}"
 
-    # Microsoft's actual layout: (N//4, K) outer x inner
-    raw_2d = raw.reshape(N // 4, K)
-    # Decode: codes[i, k] for output row i, input col k
-    codes = np.empty((N, K), dtype=np.uint8)
-    for offset in range(4):  # row offset 0..3 within each 4-group
-        # row offset 0 is at HIGH bits (shift 6), offset 3 at LOW bits (shift 0)
-        shift = 6 - offset * 2
-        codes[offset::4, :] = (raw_2d >> shift) & 3
+    # Decode flat[N*K] from raw[total/4] bytes
+    # Group bytes into 32-byte blocks; each block represents 128 elements
+    n_blocks = total // 128
+    raw_blocks = raw.reshape(n_blocks, 32)  # n_blocks of 32 bytes each
 
-    # Remap microsoft's code values to ours
-    remap = np.array([2, 0, 1, 0], dtype=np.uint8)  # micro: 0=-1, 1=0, 2=+1; ours: 0=0, 1=+1, 2=-1
+    # Each byte p in a block holds 4 codes for elements at positions p, p+32, p+64, p+96
+    # of that block. Shifts: group 0 (positions 0..31) at HIGH bits (shift 6).
+    flat_codes = np.empty(total, dtype=np.uint8)
+    for group in range(4):
+        shift = 6 - group * 2
+        # codes[block, p] -> flat position block*128 + group*32 + p
+        decoded = (raw_blocks >> shift) & 3
+        # Reshape and place
+        flat_codes[group*32::128] = 0  # init slot positions across all blocks
+    # Better: vectorize properly
+    # For each block, for each group, positions block*128 + group*32 + (0..31)
+    for group in range(4):
+        shift = 6 - group * 2
+        decoded = (raw_blocks >> shift) & 3  # shape (n_blocks, 32)
+        # flat positions: each block contributes 32 consecutive elements at offset group*32
+        # block b, position p in group -> flat = b*128 + group*32 + p
+        for b in range(n_blocks):
+            flat_codes[b*128 + group*32 : b*128 + group*32 + 32] = decoded[b]
+
+    # Tensor in (N, K) row-major (each row is K consecutive elements)
+    codes = flat_codes.reshape(N, K)
+
+    # Remap microsoft -> ours
+    remap = np.array([2, 0, 1, 0], dtype=np.uint8)
     codes = remap[codes]
 
-    # Pack into our v11 col-major: out[j_byte, k] = byte
-    # sub (kernel's bit-pair index, low-to-high) maps to output col 4*j_byte + sub
+    # Pack into our v11 col-major
     out = np.zeros((N // 4, K), dtype=np.uint8)
     for sub in range(4):
         out |= (codes[sub::4, :] & 0x3) << (sub * 2)
