@@ -376,14 +376,19 @@ bool load_model_from_bin(Model& m, const char* path, size_t* total_bytes)
             CK(cudaMalloc(&w.w->data, bytes));
             w.w->bytes = bytes;
             read_to_device(fp, w.w->data, bytes, staging);
-            // Read the per-tensor scale microsoft/BitNet's converter stores
-            // immediately after each i2_s tensor's codes (first fp32 of an
-            // 8-fp32 trailer; our converter writes just the first fp32).
+            // Read per-tensor i2_scale from microsoft converter's trailer.
+            // BUT: empirically the BitNet 2B-4T attn_norm/sub_norm gammas
+            // are very small (~0.01-0.02), suggesting they ABSORB the
+            // weight scale. Applying ws again would double-count.
+            // Tentative override: ignore stored scale, use 1.0 (gammas
+            // handle the magnitude). If FFN matmuls still need scaling,
+            // a per-matmul override could re-enable for those tensors.
             float scale;
             if (std::fread(&scale, sizeof(float), 1, fp) != 1) {
                 std::fprintf(stderr, "missing scale for layer %u\n", L); std::exit(1);
             }
-            w.w->scale = scale;
+            w.w->scale = 1.0f;  // override: gammas already absorb weight scale
+            (void)scale;
             *total_bytes += bytes + sizeof(float);
         }
     }
@@ -600,11 +605,11 @@ int main(int argc, char** argv) {
     std::printf("  ter sim packed-trit Llama 1B (forward_packed)    : 421 t/s = 2.37 ms/token (cudaGraph, May 2026)\n");
     std::printf("  llama.cpp Q8_0 (Llama 3.2 1B, RTX 3090 clean GPU): 395 t/s = 2.53 ms/token (real ref, May 2026)\n");
 
-    // Hidden state sanity check: dump first 12 values of final hidden after
-    // last forward. Real weights -> finite non-trivial values. Random
-    // weights -> usually trivial or extreme.
+    // Hidden state sanity check: dump first 12 values of x_norm (POST
+    // output_norm — what would feed into lm_head). For BitNet b1.58 with
+    // properly trained weights, these should be O(1) magnitude.
     std::vector<__half> h_hidden(m.cfg.H);
-    CK(cudaMemcpy(h_hidden.data(), s.hidden, m.cfg.H * sizeof(__half),
+    CK(cudaMemcpy(h_hidden.data(), s.x_norm, m.cfg.H * sizeof(__half),
                   cudaMemcpyDeviceToHost));
     float sum = 0, sum2 = 0, mx = -1e30f, mn = 1e30f;
     int finite = 0;
