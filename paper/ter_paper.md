@@ -372,7 +372,7 @@ to 1.07× **ahead** on Llama 1B:
 | + device-pointer scale (eliminates D2H syncs) | 28.9 | 34.6 | 1.97× | 14× behind |
 | + v11 warp-coop kernel (replaces v4) | 200.6 | 4.99 | 13.6× | 1.97× behind |
 | + cudaGraph capture (eliminates per-token CPU pacing) | **412** | **2.43** | **28.0×** | **1.04× AHEAD** |
-| + fused rmsnorm+quant + silu+quant (49 launches/token saved) | **434** | **2.30** | **29.5×** | **1.10× AHEAD** |
+| + fused rmsnorm+quant + silu+quant (49 launches/token saved) | **425** | **2.35** | **28.9×** | **1.08× AHEAD** |
 
 **Fix 1: device-pointer scale.** The int8 quantization scale was being
 read back to host via `cudaMemcpy(DeviceToHost)` after every
@@ -419,11 +419,12 @@ one kernel). A complementary `silu_mul_quant_k` fuses SiLU + multiply
 (attn-input + ffn-input rmsnorm/quant pairs) + 1 launch (silu+quant
 pair) = 3 launches × 16 layers + 1 (lm_head output_norm/quant) = **49
 fewer kernel launches per token**. Result on clean GPU best-of-N:
-412 → **434 t/s**, **+5%**. The remaining gap to BitNet's larger
+412 → **425 t/s** (median; range 418-429 across 6 consecutive runs
+after warm-up, best 429.5), **+3-4%**. The remaining gap to BitNet's larger
 +7% Stage 3 gain is explained by Llama 1B having half the layers
 (16 vs 30) and fewer fusable pairs per layer (3 vs 6).
 
-**Caveat:** the 434 t/s headline is on synthetic random ternary
+**Caveat:** the 425 t/s headline is on synthetic random ternary
 weights with `Smax=64` (the maximum captured-graph attention horizon).
 Correctness against Llama 3.2 1B golden tokens has not been
 re-validated post-kernel-swap and post-cudaGraph; this requires:
