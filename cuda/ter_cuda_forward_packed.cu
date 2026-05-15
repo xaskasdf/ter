@@ -61,7 +61,8 @@ __global__ void quant_int8_k(const __half* x, int8_t* y, float* scale_out, int N
     }
 }
 
-__global__ void rope_k(__half* v, int n_heads, int head_dim, int pos, float theta) {
+__global__ void rope_k(__half* v, int n_heads, int head_dim, const int* pos_dev, float theta) {
+    int pos = pos_dev[0];
     int h = blockIdx.x;
     int k = threadIdx.x;
     if (k >= head_dim/2) return;
@@ -72,6 +73,34 @@ __global__ void rope_k(__half* v, int n_heads, int head_dim, int pos, float thet
     float v0 = __half2float(v[idx]), v1 = __half2float(v[idx+1]);
     v[idx]   = __float2half(v0*c - v1*s);
     v[idx+1] = __float2half(v0*s + v1*c);
+}
+
+// Copy K/V into cache at slot [L, pos] -- replaces cudaMemcpy with a kernel
+// that reads pos from device, enabling cudaGraph capture.
+__global__ void kv_copy_k(
+    const __half* k, const __half* v, __half* K_cache, __half* V_cache,
+    int L, int Smax, int Hkv, const int* pos_dev)
+{
+    int p = pos_dev[0];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= Hkv) return;
+    size_t off = ((size_t)L * Smax + p) * Hkv + idx;
+    K_cache[off] = k[idx];
+    V_cache[off] = v[idx];
+}
+
+// Increment pos counter on device (called once per forward, after all uses).
+__global__ void inc_pos_k(int* pos_dev) { if (threadIdx.x == 0) pos_dev[0] += 1; }
+
+// Token embedding lookup: copy token_embd[token_id_dev[0] * H .. + H] into hidden.
+// Replaces cudaMemcpyDeviceToDevice with kernel for graph capture.
+__global__ void token_embed_lookup_k(
+    const __half* token_embd, int H, const int* token_id_dev, __half* hidden)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= H) return;
+    int t = token_id_dev[0];
+    hidden[tid] = token_embd[(size_t)t * H + tid];
 }
 
 __global__ void silu_mul_k(const __half* g, const __half* u, __half* o, int N) {
@@ -88,14 +117,16 @@ __global__ void add_k(__half* x, const __half* y, int N) {
 
 __global__ void attention_k(
     const __half* Q, const __half* K, const __half* V, __half* out,
-    int n_heads, int n_kv_heads, int head_dim, int seq_len, int max_seq)
+    int n_heads, int n_kv_heads, int head_dim, const int* pos_dev, int max_seq)
 {
+    int seq_len = pos_dev[0] + 1;
     int h = blockIdx.x;
     int kv_h = h * n_kv_heads / n_heads;
     int tid = threadIdx.x;
     extern __shared__ float smem[];
+    // shmem size capped at (max_seq + head_dim) for cudaGraph compatibility
     float* scores = smem;
-    float* outv = smem + seq_len;
+    float* outv = smem + max_seq;
     float inv_sqrt = rsqrtf((float)head_dim);
     for (int s = tid; s < seq_len; s += blockDim.x) {
         float dot = 0.f;
@@ -221,6 +252,8 @@ struct Scratch {
     float *scale_buf;
     __half *K_cache, *V_cache;
     int *next_token;
+    int *pos_dev;        // device-resident position counter (graph-capture friendly)
+    int *token_id_dev;   // device-resident current token id (chained from argmax)
 };
 
 static void fill_random_packed(uint8_t* d, size_t bytes, std::mt19937& rng) {
@@ -287,62 +320,74 @@ void alloc_scratch(Scratch& s, const Cfg& c) {
     CK(cudaMalloc(&s.K_cache, (size_t)c.Nl * c.Smax * Hkv * sizeof(__half)));
     CK(cudaMalloc(&s.V_cache, (size_t)c.Nl * c.Smax * Hkv * sizeof(__half)));
     CK(cudaMalloc(&s.next_token, sizeof(int)));
+    CK(cudaMalloc(&s.pos_dev, sizeof(int)));
+    CK(cudaMalloc(&s.token_id_dev, sizeof(int)));
 }
 
 static void mm_packed_dispatch(const int8_t* X, const float* scale_x_dev, const WPK& W,
-                               __half* out, int K, int N)
+                               __half* out, int K, int N, cudaStream_t stream = 0)
 {
     // v11 layout: 4 cols per warp, warps_per_block = 8 (256 threads)
     int t = 256;
     int blocks = (N / 4 + 8 - 1) / 8;
-    mm_packed_v4<<<blocks, t>>>(X, W.data, K, N, scale_x_dev, W.scale, out);
+    mm_packed_v4<<<blocks, t, 0, stream>>>(X, W.data, K, N, scale_x_dev, W.scale, out);
 }
 
-int forward_token(Model& m, Scratch& s, int token_id, int pos)
+// All-device forward: pos and token_id read from device pointers, no host
+// state per kernel launch. Argmax result written to s.token_id_dev so the
+// next call chains automatically. cudaGraph-capturable when stream != 0.
+void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
 {
     const Cfg& c = m.cfg;
     int Hkv = c.Nkv * c.Hd;
-    CK(cudaMemcpy(s.hidden, m.token_embd + (size_t)token_id * c.H, c.H*sizeof(__half), cudaMemcpyDeviceToDevice));
+    int hblk = (c.H + 255) / 256;
+    token_embed_lookup_k<<<hblk, 256, 0, st>>>(m.token_embd, c.H, s.token_id_dev, s.hidden);
 
     for (int L = 0; L < c.Nl; ++L) {
         Layer& l = m.layers[L];
-        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H);
-        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv);
-        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wv, s.v, c.H, Hkv);
-        rope_k<<<c.Nh,  c.Hd/2>>>(s.q, c.Nh,  c.Hd, pos, c.rope_theta);
-        rope_k<<<c.Nkv, c.Hd/2>>>(s.k, c.Nkv, c.Hd, pos, c.rope_theta);
-        size_t kv_off = ((size_t)L * c.Smax + pos) * Hkv;
-        CK(cudaMemcpyAsync(s.K_cache + kv_off, s.k, Hkv*sizeof(__half), cudaMemcpyDeviceToDevice));
-        CK(cudaMemcpyAsync(s.V_cache + kv_off, s.v, Hkv*sizeof(__half), cudaMemcpyDeviceToDevice));
+        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.attn_norm, s.x_norm, c.H, c.eps);
+        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wq, s.q, c.H, c.H, st);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wk, s.k, c.H, Hkv, st);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wv, s.v, c.H, Hkv, st);
+        rope_k<<<c.Nh,  c.Hd/2, 0, st>>>(s.q, c.Nh,  c.Hd, s.pos_dev, c.rope_theta);
+        rope_k<<<c.Nkv, c.Hd/2, 0, st>>>(s.k, c.Nkv, c.Hd, s.pos_dev, c.rope_theta);
+        int kvb = (Hkv + 255) / 256;
+        kv_copy_k<<<kvb, 256, 0, st>>>(s.k, s.v, s.K_cache, s.V_cache, L, c.Smax, Hkv, s.pos_dev);
         size_t cache_off = (size_t)L * c.Smax * Hkv;
-        int seq_len = pos + 1;
-        size_t shmem = (seq_len + c.Hd) * sizeof(float);
-        attention_k<<<c.Nh, 64, shmem>>>(s.q, s.K_cache+cache_off, s.V_cache+cache_off,
-            s.attn_out, c.Nh, c.Nkv, c.Hd, seq_len, c.Smax);
-        quant_int8_k<<<1,256,256*sizeof(float)>>>(s.attn_out, s.x_q, s.scale_buf, c.H);
-        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H);
-        int blocks = (c.H+255)/256;
-        add_k<<<blocks,256>>>(s.hidden, s.attn_out, c.H);
+        size_t shmem_max = (c.Smax + c.Hd) * sizeof(float);
+        attention_k<<<c.Nh, 64, shmem_max, st>>>(s.q, s.K_cache+cache_off, s.V_cache+cache_off,
+            s.attn_out, c.Nh, c.Nkv, c.Hd, s.pos_dev, c.Smax);
+        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.attn_out, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wo, s.attn_out, c.H, c.H, st);
+        add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
 
-        rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
-        quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F);
-        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F);
+        rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, l.ffn_norm, s.x_norm, c.H, c.eps);
+        quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wgate, s.gate, c.H, c.F, st);
+        mm_packed_dispatch(s.x_q, s.scale_buf, l.Wup,   s.up,   c.H, c.F, st);
         int fblocks = (c.F+255)/256;
-        silu_mul_k<<<fblocks,256>>>(s.gate, s.up, s.ff, c.F);
-        quant_int8_k<<<1,1024,1024*sizeof(float)>>>(s.ff, s.ff_q, s.scale_buf, c.F);
-        mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H);
-        add_k<<<blocks,256>>>(s.hidden, s.attn_out, c.H);
+        silu_mul_k<<<fblocks,256,0,st>>>(s.gate, s.up, s.ff, c.F);
+        quant_int8_k<<<1,1024,1024*sizeof(float),st>>>(s.ff, s.ff_q, s.scale_buf, c.F);
+        mm_packed_dispatch(s.ff_q, s.scale_buf, l.Wdown, s.attn_out, c.F, c.H, st);
+        add_k<<<hblk,256,0,st>>>(s.hidden, s.attn_out, c.H);
     }
 
-    rmsnorm_k<<<1,256,256*sizeof(float)>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
-    quant_int8_k<<<1,256,256*sizeof(float)>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
-    mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V);
-    argmax_k<<<1,256,256*(sizeof(float)+sizeof(int))>>>(s.logits, s.next_token, c.V);
+    rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
+    quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
+    mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
+    argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
+    inc_pos_k<<<1, 1, 0, st>>>(s.pos_dev);
+}
+
+// Backward-compat wrapper: takes host token/pos, writes to device, runs forward,
+// reads next_token back. Kept for reference / debugging; bench uses graph path.
+int forward_token(Model& m, Scratch& s, int token_id, int pos) {
+    CK(cudaMemcpy(s.token_id_dev, &token_id, sizeof(int), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(s.pos_dev, &pos, sizeof(int), cudaMemcpyHostToDevice));
+    forward_token_dev(m, s);
     int next = 0;
-    CK(cudaMemcpy(&next, s.next_token, sizeof(int), cudaMemcpyDeviceToHost));
+    CK(cudaMemcpy(&next, s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
     return next;
 }
 
@@ -367,14 +412,39 @@ int main(int argc, char** argv) {
     std::printf("Total VRAM for weights: %.2f MB (vs INT8 baseline ~1180 MB)\n",
         total_bytes / (1024.0*1024.0));
 
+    // Warmup with the host-state path (also exercises both code paths)
     for (int t = 0; t < n_warmup; ++t) forward_token(m, s, 1, t);
     CK(cudaDeviceSynchronize());
 
-    auto t0 = std::chrono::high_resolution_clock::now();
-    int tok = 1;
-    for (int t = 0; t < n_gen; ++t) tok = forward_token(m, s, tok, n_warmup + t);
+    // Reset device state for the captured graph: pos = n_warmup, token_id = 1
+    int init_pos = n_warmup, init_tok = 1;
+    CK(cudaMemcpy(s.pos_dev,      &init_pos, sizeof(int), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(s.token_id_dev, &init_tok, sizeof(int), cudaMemcpyHostToDevice));
+
+    // Capture forward into a cudaGraph. Kernels in forward_token_dev launch on
+    // the legacy default stream (0); cudaStreamCaptureModeGlobal on a real
+    // stream captures all default-stream activity from this thread too.
+    cudaStream_t stream; CK(cudaStreamCreate(&stream));
+    cudaGraph_t graph;
+    CK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    forward_token_dev(m, s, stream);
+    CK(cudaStreamEndCapture(stream, &graph));
+    cudaGraphExec_t graph_exec;
+    CK(cudaGraphInstantiate(&graph_exec, graph, nullptr, nullptr, 0));
+
+    // After capture pos/token advanced once; reset for the timed loop.
+    CK(cudaMemcpy(s.pos_dev,      &init_pos, sizeof(int), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(s.token_id_dev, &init_tok, sizeof(int), cudaMemcpyHostToDevice));
     CK(cudaDeviceSynchronize());
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (int t = 0; t < n_gen; ++t) CK(cudaGraphLaunch(graph_exec, stream));
+    CK(cudaStreamSynchronize(stream));
     auto t1 = std::chrono::high_resolution_clock::now();
+
+    cudaGraphExecDestroy(graph_exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
 
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     double per_tok = ms / n_gen;

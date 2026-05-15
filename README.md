@@ -91,10 +91,11 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
 - [x] **F12.7** Ternary-optimized packed kernels:
     - v4 wide → v6 dp4a → v7 colmaj → v8 warp → v10 unroll → v11 warp4 → v13
     - Best-per-shape dispatch: **6.67 ms / 186 GMAC/s, 1.90× faster than INT8 TC**
-- [x] **F12.8** End-to-end forward optimization (round 2): **14.7 → 200.6 t/s (13.6×)**
+- [x] **F12.8** End-to-end forward optimization (round 2): **14.7 → 421.5 t/s (28.7×)**
     - Fix 1: device-pointer scale eliminates 65 D2H syncs/token → 28.9 t/s
     - Fix 2: forward kernel upgrade v4 → v11 warp-coop → 200.6 t/s
-    - Gap to llama.cpp Q8_0 cut from 27× to **1.97×**, addressable via cudaGraph + persistent attention.
+    - Fix 3: cudaGraph capture (all state on-device, entire forward as one graph) → 421.5 t/s
+    - Result: **1.07× faster than llama.cpp Q8_0** on Llama 1B, RTX 3090, 1.58 bits/weight, no tensor cores.
 
 ## Headline numbers (Llama 1B Q8_0, RTX 3090)
 
