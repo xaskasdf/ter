@@ -161,6 +161,30 @@ __global__ void attention_k(
         out[h*head_dim+d] = __float2half(outv[d]);
 }
 
+// fp16 lm_head matmul for weight-tied transformers (BitNet 2B-4T uses
+// token_embd as both input lookup and output projection). Layout:
+//   x_norm[H] = post-output_norm hidden state (fp16, M=1)
+//   token_embd[V, H] = embedding table stored row-major (V rows of H fp16)
+//   logits[V] = output (fp16)
+// One warp per output vocab position. Warp-cooperative K-reduction over H.
+__global__ void mm_fp16_lm_head_k(
+    const __half* __restrict__ x_norm,
+    const __half* __restrict__ token_embd,
+    __half* __restrict__ logits,
+    int H, int V)
+{
+    int v = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
+    if (v >= V) return;
+    int lane = threadIdx.x & 31;
+    const __half* row = token_embd + (size_t)v * H;
+    float acc = 0.f;
+    for (int k = lane; k < H; k += 32) {
+        acc += __half2float(x_norm[k]) * __half2float(row[k]);
+    }
+    for (int o = 16; o > 0; o >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, o);
+    if (lane == 0) logits[v] = __float2half(acc);
+}
+
 __global__ void argmax_k(const __half* logits, int* out_idx, int N) {
     extern __shared__ float smem[];
     int* sidx = (int*)(smem + blockDim.x);
@@ -505,14 +529,18 @@ void forward_token_dev(Model& m, Scratch& s, cudaStream_t st = 0)
 
     rmsnorm_k<<<1,256,256*sizeof(float),st>>>(s.hidden, m.output_norm, s.x_norm, c.H, c.eps);
     if (m.lm_head.data != nullptr) {
+        // Packed-ternary lm_head path (random-weight bench mode)
         quant_int8_k<<<1,256,256*sizeof(float),st>>>(s.x_norm, s.x_q, s.scale_buf, c.H);
         mm_packed_dispatch(s.x_q, s.scale_buf, m.lm_head, s.logits, c.H, c.V, st);
-        argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
+    } else {
+        // Real BitNet path: lm_head is tied to F16 token_embd. fp16 matmul.
+        // grid.x = V / (warps_per_block), block = 8 warps * 32 = 256 threads
+        constexpr int WARPS_PER_BLOCK = 8;
+        int blocks = (c.V + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
+        mm_fp16_lm_head_k<<<blocks, WARPS_PER_BLOCK * 32, 0, st>>>(
+            s.x_norm, m.token_embd, s.logits, c.H, c.V);
     }
-    // else: real-BitNet path, lm_head is tied to F16 token_embd and needs
-    // an fp16 matmul kernel (not yet implemented). For validation runs,
-    // token_id_dev is updated externally (or held constant) so the graph
-    // can still loop without divergence.
+    argmax_k<<<1,256,256*(sizeof(float)+sizeof(int)),st>>>(s.logits, s.token_id_dev, c.V);
     inc_pos_k<<<1, 1, 0, st>>>(s.pos_dev);
 }
 
@@ -590,10 +618,6 @@ int main(int argc, char** argv) {
     CK(cudaStreamSynchronize(stream));
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    cudaGraphExecDestroy(graph_exec);
-    cudaGraphDestroy(graph);
-    cudaStreamDestroy(stream);
-
     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     double per_tok = ms / n_gen;
     std::printf("\n=== ter sim BitNet 2B-4T forward (1.58b weights + sub-norms, end-to-end) ===\n");
@@ -604,6 +628,32 @@ int main(int argc, char** argv) {
     std::printf("\nReference:\n");
     std::printf("  ter sim packed-trit Llama 1B (forward_packed)    : 421 t/s = 2.37 ms/token (cudaGraph, May 2026)\n");
     std::printf("  llama.cpp Q8_0 (Llama 3.2 1B, RTX 3090 clean GPU): 395 t/s = 2.53 ms/token (real ref, May 2026)\n");
+
+    // Token generation trace: dump first 16 generated token IDs from the
+    // chained graph (each forward's argmax writes to s.token_id_dev which
+    // feeds the next forward's embed lookup).
+    int tok_log[16] = {0};
+    int tok_now;
+    CK(cudaMemcpy(&tok_now, s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
+    std::printf("\nFinal token after %d gens: %d\n", n_gen, tok_now);
+
+    // Re-run a short generation trace from a known starting point to log tokens.
+    // Reset state to (pos=0, token_id=1=BOS approx) and run 16 graph launches.
+    int reset_pos = 0, reset_tok = 1;
+    CK(cudaMemcpy(s.pos_dev,      &reset_pos, sizeof(int), cudaMemcpyHostToDevice));
+    CK(cudaMemcpy(s.token_id_dev, &reset_tok, sizeof(int), cudaMemcpyHostToDevice));
+    for (int t = 0; t < 16 && t < m.cfg.Smax - 1; ++t) {
+        CK(cudaGraphLaunch(graph_exec, stream));
+        CK(cudaStreamSynchronize(stream));
+        CK(cudaMemcpy(&tok_log[t], s.token_id_dev, sizeof(int), cudaMemcpyDeviceToHost));
+    }
+    std::printf("First 16 generated token IDs (from token_id=1, pos=0): ");
+    for (int t = 0; t < 16; ++t) std::printf("%d ", tok_log[t]);
+    std::printf("\n");
+
+    cudaGraphExecDestroy(graph_exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(stream);
 
     // Hidden state sanity check: dump first 12 values of x_norm (POST
     // output_norm — what would feed into lm_head). For BitNet b1.58 with
