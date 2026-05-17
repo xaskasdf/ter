@@ -28,10 +28,10 @@
   xrightmargin=4pt
 }
 
-\title{\texttt{ter}: Running Modern {LLMs} on a Balanced-Ternary {CPU}
-       Substrate, with a Custom {CUDA} Kernel that Beats {INT8} Tensor
-       Cores by $1.9\times$ Without Using Them, and an End-to-End
-       Engine that Beats \texttt{llama.cpp} {Q8\_0}}
+\title{\texttt{ter}: A Balanced-Ternary Substrate Simulator that
+       Runs Llama 3.2 1B Faster than \texttt{llama.cpp} {Q8\_0}
+       and Reproduces BitNet 2B-4T Bit-Exact at $1.58$ Bits per
+       Weight on Consumer {GPUs}}
 
 \author{
   Samuel Cortes \\
@@ -48,32 +48,45 @@
 We present \texttt{ter}, a balanced-ternary {CPU} simulator with {SIMD}
 extension and bytecode kernels (\texttt{tk\_matmul\_b\_9t},
 \texttt{tk\_rmsnorm}, \texttt{tk\_silu}, \texttt{tk\_softmax},
-\texttt{tk\_rope}). Modern transformer language models---Llama 3.2 1B
-(Q8\_0), BitNet b1.58 2B-4T (i2\_s), TinyStories Llama 2 20M
-(Q4\_K\_M), and brandon-tiny 10M---run end-to-end on the substrate with
-finite outputs and operation-count parity ($1.002\times$ lane-MACs vs the
-analytical fp16 baseline). To enable architectural iteration at sweepable
-speed, we ported the inner matmul to {CUDA} and discovered that
-ternary-optimized packed kernels (column-major byte layout, \texttt{\_\_dp4a}
-{SIMD} dot products, four output columns per warp, warp-cooperative
-{K}-reduction) beat cuBLAS {INT8} tensor cores by $\mathbf{1.90\times}$
-on the Llama 1B matmul fabric, with per-shape advantages up to $4.18\times$
-on \texttt{ffn\_down}---all without using tensor cores. The architectural
-memory advantage ($8\times$ compression versus fp16) materializes as
-wall-clock superiority through the structural property that one packed
-byte yields 16 useful {MAC}s. A round-2 engineering pass on the
-end-to-end forward (device-pointer scales, kernel upgrade to the
-warp-cooperative variant, \texttt{cudaGraph} capture, and rmsnorm/quant
-fusion) brings Llama 3.2 1B production inference to
-$\mathbf{425}$ tokens/s on the same {RTX 3090}, $\mathbf{1.08\times}$
-faster than \texttt{llama.cpp} {Q8\_0}. A subsequent integration of real
-\texttt{microsoft/BitNet} 2B-4T (i2\_s) weights with sub-{RMSNorm}s,
-{ReLU}$^2$ {FFN}, {NEOX} {RoPE}, fp32 residual stream, and a
-ternary-only {ADD}-only matmul kernel reaches $214$ tokens/s with
-$8/8$ {BOS}-greedy tokens bit-exact against \texttt{microsoft/BitNet}
-\texttt{llama-cli}. Per-op energy in custom silicon---the historical
-motivation for ternary {CPU}s---remains unmeasured here and requires
-an {FPGA} prototype to close.
+\texttt{tk\_rope}). The simulator serves as the research vehicle:
+modern transformer language models---Llama 3.2 1B (Q8\_0, post-training
+ternarized), BitNet b1.58 2B-4T (i2\_s, {QAT}-trained), TinyStories
+Llama 2 20M, and brandon-tiny 10M---run end-to-end on the substrate
+with finite outputs and operation-count parity ($1.002\times$
+lane-MACs vs the analytical fp16 baseline).
+
+To enable architectural iteration at sweepable speed, we ported the
+inner matmul to {CUDA}. The paper reports two engineering results
+in this {GPU} regime: (i) on Llama 3.2 1B, a round-2 engineering pass
+on the end-to-end forward (device-pointer scales, warp-cooperative
+packed-trit kernel, \texttt{cudaGraph} capture, and rmsnorm/quant
+fusion) reaches $\mathbf{425}$ tokens/s on {RTX 3090},
+$\mathbf{1.08\times}$ faster than \texttt{llama.cpp} {Q8\_0}; (ii) on
+BitNet b1.58 2B-4T, integration of real \texttt{microsoft/BitNet}
+i2\_s weights with sub-{RMSNorm}s, {ReLU}$^2$ {FFN}, {NEOX} {RoPE},
+fp32 residual stream, and a ternary-only {ADD}-only matmul kernel
+reaches $214$ tokens/s with $\mathbf{8/8}$ {BOS}-greedy tokens
+bit-exact against the \texttt{microsoft/BitNet} \texttt{llama-cli}
+reference.
+
+We are explicit about what is and is not ternary about these results.
+The matmul-fabric speedup of $1.90\times$ over cuBLAS {INT8} tensor
+cores at single-token gen is attributable to packed sub-byte storage
+($4$ trits per byte), not to ternary arithmetic per se: the formal
+analysis of Cuevas (2026) decomposes $\sim 1.88\times$ as a bandwidth
+ratio (16 {MAC}s per $17$ bytes read versus $1/2$ for {INT8}), and our
+own {ADD}-only experiment shows that eliminating multiplications does
+not yield throughput on commodity {GPU}. The genuinely ternary
+contribution is bit-exact reproduction of the {QAT}-trained BitNet
+2B-4T model, where substrate-data alignment is semantically
+meaningful. The per-op energy advantage that historically motivated
+ternary {CPU}s---and that the simulator was designed to explore---
+remains unmeasured and requires an {FPGA} prototype to close. Related
+{LUT}-based low-bit work on {CPU} \cite{tmac-eurosys-2025}, {FPGA}
+\cite{lutmul-aspdac-2025,tellme-2025}, and {ASIC}
+\cite{platinum-2025,cutie-2020} precedes ours; we contribute the
+specific {GPU} \texttt{\_\_dp4a} packed-trit kernel design plus
+end-to-end engine integration with bit-exact validation.
 \end{abstract}
 
 \keywords{balanced ternary computing \and {LLM} inference \and {CUDA}
@@ -100,22 +113,37 @@ We answer this in three parts:
     BitNet b1.58 2B-4T i2\_s).
   \item Validate three hypotheses about the substrate at the
     architectural (operation-count) level.
-  \item Port the matmul fabric to {CUDA} and measure whether the
-    architectural win translates to wall-clock supremacy on existing
-    silicon (an {NVIDIA} {RTX} 3090).
+  \item Port the matmul fabric to {CUDA} (as an iteration aid for the
+    simulator, and to measure the wall-clock behavior of packed sub-byte
+    ternary storage on existing silicon, an {NVIDIA} {RTX} 3090).
 \end{enumerate}
 
-The headline finding is positive. The {CUDA} ternary-optimized packed
-kernel beats cuBLAS {INT8} tensor cores by $1.90\times$ on the Llama 1B
-matmul fabric, despite using no tensor cores at all. A round-2
-engineering pass closes the end-to-end gap to \texttt{llama.cpp}
-\citep{llamacpp} as well: $14.7 \rightarrow 425$ tokens/s
-($28.9\times$), $1.08\times$ faster than \texttt{llama.cpp} {Q8\_0}.
-A subsequent integration of \texttt{microsoft/BitNet} 2B-4T runs
-end-to-end with $8/8$ tokens bit-exact against the reference
-implementation. Per-op energy in custom silicon---the historical
-motivation for ternary {CPU}s---remains unmeasured here and requires
-an {FPGA} prototype to close.
+The two engineering results that this paper defends are:
+(a) end-to-end Llama 3.2 1B inference at $\mathbf{425}$ tokens/s on
+{RTX 3090} ($28.9\times$ over our v1 baseline, $1.08\times$ faster
+than \texttt{llama.cpp} \citep{llamacpp} {Q8\_0}); and
+(b) bit-exact reproduction of \texttt{microsoft/BitNet} 2B-4T at
+$214$ tokens/s ($8/8$ BOS-greedy tokens match the reference
+implementation).
+
+The {GPU} matmul-fabric measurement underlying (a) is a $1.90\times$
+speedup over cuBLAS {INT8} tensor cores at single-token gen on the
+Llama 1B shapes. We attribute this speedup to packed sub-byte storage
+($4$ trits per byte, $1.58$ bits per weight) rather than to ternary
+arithmetic itself, following the formal decomposition of
+\citet{cuevas-formal-2026} (\S5.2): bandwidth density yields $\sim 1.88\times$,
+and our own {ADD}-only kernel that eliminates multiplications
+\emph{matches} but does \emph{not exceed} the \texttt{\_\_dp4a}-based
+packed kernel. The same advantage would in principle accrue to a
+generic two-bit packing scheme; we discuss this honestly in
+\S\ref{sec:what-is-ternary}. Per-op energy in custom silicon---the
+historical motivation for ternary {CPU}s, and the original target of
+the substrate simulator---remains unmeasured here and requires an
+{FPGA} prototype to close. Related {LUT}-based low-bit acceleration
+work \citep{tmac-eurosys-2025,lutmul-aspdac-2025,platinum-2025,tellme-2025,cutie-2020}
+precedes ours; our contribution is the specific {GPU} packed-trit
+kernel design plus the end-to-end engine integration validated
+bit-exact against a published reference.
 
 The simulator is at \url{https://github.com/xaskasdf/ter}; all
 benchmarks are reproducible.
@@ -151,7 +179,50 @@ official {HuggingFace} mirror.
 prior 10M-parameter instruction-following {LLM}; used here as a tiny
 end-to-end smoke target.
 
+\textbf{{LUT}-based low-bit acceleration.} The principle that low-bit
+weight multiplications can be replaced by precomputed table lookups
+has been demonstrated on multiple platforms.
+\textbf{T-MAC} \citep{tmac-eurosys-2025} achieves up to $6.6\times$
+speedup over \texttt{llama.cpp} on {CPU} for $1$--$4$ bit weights via
+bit-wise table lookup, with $\sim 70\%$ energy reduction.
+\textbf{LUTMUL} \citep{lutmul-aspdac-2025} exceeds the conventional
+{DSP}-based roofline on {FPGA} by exploiting the $100:1$ {LUT}-to-{DSP}
+ratio. \textbf{Platinum} \citep{platinum-2025} adds path-adaptable
+{LUT}-based acceleration for low-bit matrix multiplication.
+\textbf{TeLLMe} \citep{tellme-2025} reports an energy-efficient
+ternary {LLM} accelerator for edge {FPGA}s covering both prefill and
+decode. \textbf{CUTIE} \citep{cutie-2020} demonstrates ternary {DNN}
+inference at $> 1$ PetaOp/s/W in {ASIC} silicon. None of these works
+require ``ternary arithmetic'' as a hardware primitive: they exploit
+that low-precision weights admit small precomputed tables.
+
+\textbf{Ternary weight networks.} \citet{ternary-weight-2016} are the
+historical predecessor, restricting weights to $\{-\alpha, 0, +\alpha\}$
+with a learned scale per layer; their work establishes the model-level
+viability of post-training and {QAT} ternarization.
+
+\textbf{Energy models and critique.} \citet{horowitz-energy-2014}
+provides the per-operation pJ baselines (45nm {CMOS}) for {MUL}/{ADD}
+that we use to reason about silicon-investment tradeoffs.
+\citet{prom-2025} argues that reducing multiplication count is more
+valuable than further reducing bit-width.
+\citet{cuevas-formal-2026} gives a formal analysis specifically
+relevant to this paper: (i) a lower bound of $\rho_3 \geq 3.8\times$
+energy savings per {MAC} for ternary weights with INT8 activations on
+45nm silicon (consistent with the empirical $71.4\times$ reported in
+\citep{bitnet158-2024} on 7nm); (ii) a proof that the efficiency
+$\eta(k) = \log_2(k) / C_{\mathrm{MAC}}(k)$ over symmetric weight
+alphabets $\mathcal{W}_k$ is maximized at $k=3$; (iii) a formal
+{MAC}-to-{LUT} reduction. The same author also publishes a critical
+review of an earlier draft of the present work which motivates the
+honest decomposition we now make in
+\S\ref{sec:what-is-ternary}---most notably the observation that the
+$1.90\times$ matmul-fabric speedup on commodity {GPU} is attributable
+to packed sub-byte storage density rather than to ternary arithmetic
+semantics. We follow that critique in this revision.
+
 \section{Substrate architecture}
+\label{sec:architecture}
 
 \subsection{Number formats}
 
@@ -417,8 +488,11 @@ structural property of the packed-trit storage layout. Each byte holds
 Combined with the column-major byte layout (4 contiguous K-bytes $=$ 1
 \texttt{uint32} load) and warp-cooperative K-reduction (32 threads share
 the K dimension and warp-shuffle their partial sums to lane 0), the
-packed-trit kernel achieves higher throughput than {INT8} tensor cores
-on most Llama 1B shapes despite using no tensor cores at all.
+packed-trit kernel achieves higher throughput than the cuBLAS {INT8}
+tensor-core reference on most Llama 1B shapes at single-token gen.
+We attribute the gain primarily to memory-bandwidth density (each weight
+byte delivers $16$ {MAC}s of useful work) and discuss the limits of
+this attribution in \S\ref{sec:what-is-ternary}.
 
 \subsection{Per-shape results}
 
@@ -555,9 +629,13 @@ $49$ fewer kernel launches per token on Llama 1B (16 layers).
 
 The final result---$\mathbf{425}$ tokens/s, $\mathbf{1.08\times}$
 faster than \texttt{llama.cpp} {Q8\_0}---demonstrates that the
-matmul-fabric architectural win translates to end-to-end production
+packed-trit matmul fabric translates to end-to-end production
 inference on existing {GPU} silicon. The substrate runs Llama 3.2 1B
-at $\mathbf{1.58}$ bits per weight without using tensor cores at all.
+at $\mathbf{1.58}$ bits per weight on a consumer {GPU}, with the
+gen path bypassing tensor cores entirely (the hybrid dispatch
+recovers {INT4} tensor cores for prefill regimes where they
+saturate; see \S\ref{sec:what-is-ternary} for honest attribution of
+where the win comes from).
 
 \subsection{BitNet 2B-4T integration with bit-exact reference match}
 \label{sec:bitnet-e2e}
@@ -646,15 +724,101 @@ post-quantization fine-tuning to recover quality. These are
 follow-up tasks; the substrate's throughput claim and kernel
 correctness are now both defensible.
 
+\subsection{What is and isn't ternary about this work}
+\label{sec:what-is-ternary}
+
+The previous draft of this paper attributed the $1.90\times$ matmul
+fabric speedup to a ``balanced-ternary substrate that beats {INT8}
+tensor cores without using them.'' A formal critique
+\citep{cuevas-formal-2026} pointed out that this framing conflates two
+distinct phenomena. We adopt the critique's decomposition here.
+
+\paragraph{Throughput advantage is bandwidth, not arithmetic.}
+At $M=1$ on Llama 1B shapes, the packed-trit kernel beats cuBLAS {INT8}
+{TC} by $1.90\times$ because each byte of weight read into a warp
+yields $16$ {MAC}s (four packed trits times four \texttt{\_\_dp4a}
+calls, each consuming four {INT8} activation bytes). The total bytes
+read per output element is $1$ weight byte $+ 16$ activation bytes
+$= 17$ bytes for $16$ {MAC}s, or $\approx 0.94$ {MAC}s per byte versus
+$0.5$ {MAC}s per byte for unpacked {INT8}. The ratio $0.94 / 0.5
+\approx 1.88\times$ accounts for essentially the entire measured
+$1.90\times$. The semantics of the packed values being ternary
+$\{-1, 0, +1\}$ rather than arbitrary {INT2} $\{0, 1, 2, 3\}$ is
+incidental to this throughput claim. A generic two-bit packed
+{INT2} kernel feeding \texttt{\_\_dp4a} would in principle obtain the
+same speedup. We acknowledge this explicitly; the matmul-fabric win
+is a sub-byte packing result, not a ternary-arithmetic result.
+
+\paragraph{Eliminating multiplications does not translate to GPU
+throughput.} We implemented an {ADD}-only kernel that replaces
+\texttt{\_\_dp4a} with conditional add/sub/skip, exploiting the
+architectural property that ternary multiplication is degenerate.
+{TVMAC} count is exactly zero in this kernel. At $M=1$ it
+\emph{matches} the \texttt{\_\_dp4a}-based v11 kernel; it does not
+exceed it. {CUDA} core {ALU}s charge equivalent cycles for {INT8}
+{MUL} and {ADD}; warp divergence cost on the conditional branch
+cancels the savings. The energy advantage of the ternary
+{TVMAC}-free regime would be observable on custom silicon
+\citep{horowitz-energy-2014,cutie-2020}, not on commodity {GPU}. Our
+own measurement is consistent with the formal result
+\citep[Prop.~2]{cuevas-formal-2026}: $\rho_3 \geq 3.8\times$ on 45nm
+is an energy bound, not a throughput bound on binary silicon.
+
+\paragraph{Substrate-data alignment is genuine only for {QAT}
+models.} The H3 claim that ternary substrate aligns with ternary data
+holds operationally for BitNet b1.58 2B-4T: the model was {QAT}-trained
+for ternary weights, and we reproduce $8/8$ {BOS}-greedy reference
+tokens bit-exact. For Llama 3.2 1B, post-training ternarization
+breaks quality (H1, also \S\ref{sec:llama-validation}): $0/16$ tokens
+match the {Q8\_0} golden reference, the model collapses to a
+degenerate token cycle. The $425$ tokens/s headline on Llama 1B is
+a measurement of substrate throughput on the actual ternarized weight
+matrices, not a model-quality claim.
+
+\paragraph{The kernel wastes 25\% of its code space.} The two-bit
+encoding admits four codes $\{00, 01, 10, 11\}$; ternary weights use
+only three, leaving one code unused. An {INT2} kernel using all four
+codes for $\{0, \pm 1, \pm 2\}$ or similar would not waste this
+capacity. This is a real inefficiency of the design choice. Its
+justification is theoretical rather than engineering:
+\citet[Prop.~5]{cuevas-formal-2026} proves that the efficiency
+$\eta(k) = \log_2(k) / C_{\mathrm{MAC}}(k)$ over symmetric weight
+alphabets is maximized at $k=3$ ($\eta(3) = 52.8$ versus $\eta(5) =
+38.7$, $\eta(7) = 31.2$). The design pays a $25\%$ code-space waste
+to remain at the energy optimum.
+
+\paragraph{What \emph{is} genuinely ternary and contributes.}
+First, the operation-count parity ($1.002\times$ lane-{MAC}s versus
+fp16 analytical baseline, measured by the {CPU} simulator) is a
+correctness verification that the substrate executes a faithful
+transformer forward---this validation requires the actual ternary
+substrate as the measuring instrument, not the {CUDA} port. Second,
+the BitNet 2B-4T bit-exact reproduction is a substrate-level claim
+about alignment between data format and computation format that is
+operationally true for {QAT}-trained ternary models. Third, the
+substrate simulator itself (F0--F11, AVX2 host backend,
+\texttt{libter\_k4.a} freestanding {C} ABI; \S\ref{sec:architecture})
+is the research vehicle for the project; the {CUDA} port is an
+acceleration of the inner matmul to make iteration tractable, not the
+production target. The follow-on work that would close the energy
+argument is gate-level or {FPGA} simulation of a balanced-ternary
+{ALU} compared against an equivalent-precision binary {ALU}, with
+J/{MAC} measured on real silicon. This is the next phase of the
+substrate program, and is outside the scope of the present paper.
+
 \subsection{What round 2 changes about the paper}
 
-The matmul-fabric architectural claim ($1.90\times$ faster than {INT8}
-{TC} on Llama 1B at $M=1$) is unchanged. What round 2 changes is the
+The matmul-fabric measurement ($1.90\times$ over cuBLAS {INT8} {TC}
+on Llama 1B at $M=1$) is unchanged in magnitude; only the attribution
+changes (now ascribed to packed sub-byte storage density rather than
+to ternary arithmetic semantics, per
+\S\ref{sec:what-is-ternary}). What round 2 \emph{adds} is the
 {end-to-end} story: the previous draft argued the architectural win
 would survive engineering (with caveat). Round 2 measures the
 engineering and shows it does. The substrate runs both Llama 3.2 1B
 \emph{and} BitNet 2B-4T end-to-end on {RTX 3090} at production-grade
-throughput, with bit-exact reference match for BitNet.
+throughput, with bit-exact reference match for BitNet
+\citep{microsoft-bitnet-cpp}.
 
 \section{What the simulator measures, and what it doesn't}
 
@@ -708,32 +872,68 @@ energy advantage is real but unmeasured here.
     on a balanced-ternary {CPU} substrate; both run end-to-end with finite
     outputs.
   \item Op-count parity holds: $1.002\times$ lane-{MAC}s versus the analytical
-    fp16 baseline.
-  \item Ternary substrate stores models with $8\times$ memory compression
-    versus fp16 while preserving op count.
-  \item For ternary-trained models (BitNet b1.58), substrate-data
-    alignment eliminates the multiply step from the matmul fabric (zero
-    \texttt{TVMAC}; verified analytically and on a real {GGUF}).
+    fp16 baseline (measured by the {CPU} simulator on Llama 1B).
+  \item The ternary substrate stores models at $1.58$ bits per weight
+    ($8\times$ compression versus fp16, $5\times$ versus Q8\_0) while
+    preserving operation count.
   \item Format A \texttt{tfloat} provides a precision/budget knob; 11
     trits (1+5+5) preserves Llama 1B argmax with low logit-{RMSE}.
-  \item The architectural memory win materializes as wall-clock
-    supremacy at the matmul fabric: a custom {CUDA} packed-trit kernel
-    beats cuBLAS {INT8} tensor cores by $1.90\times$ on {RTX 3090} at the
-    Llama 1B matmul fabric, with per-shape advantages up to $4.18\times$.
+  \item \textbf{Engineering result (Llama 1B end-to-end):} the {CUDA}
+    port reaches $425$ tokens/s on {RTX 3090}, $1.08\times$ faster than
+    \texttt{llama.cpp} {Q8\_0}, via four cumulative fixes (device-pointer
+    scales, packed-trit warp-cooperative kernel, \texttt{cudaGraph}
+    capture, rmsnorm/quant + silu/quant fusion). Underlying matmul
+    fabric measurement at single-token gen: $1.90\times$ over cuBLAS
+    {INT8} {TC}, attributable per \S\ref{sec:what-is-ternary} to packed
+    sub-byte memory density rather than ternary arithmetic semantics
+    \citep{cuevas-formal-2026}.
+  \item \textbf{Engineering result (BitNet 2B-4T end-to-end):}
+    integration of \texttt{microsoft/BitNet} i2\_s weights reaches
+    $214$ tokens/s with $\mathbf{8/8}$ {BOS}-greedy tokens bit-exact
+    against the \texttt{llama-cli} reference. This validates
+    substrate-data alignment for the {QAT}-trained ternary case, which
+    is the regime where the alignment is semantically meaningful.
+  \item Kernel correctness on Llama 1B is validated three-way: scalar
+    NumPy reference vs {CUDA} forward bit-exact $16/16$; reference
+    architecture vs {Q8\_0} golden (without ternarization) $7/8$;
+    ternarized Llama vs {Q8\_0} golden $0/16$ (confirming H1
+    prediction that post-training ternarization on non-{QAT} models
+    breaks quality).
 \end{enumerate}
 
 \subsection{What the paper does not claim}
 
 \begin{enumerate}
-  \item End-to-end production inference parity versus optimized fp16
-    inference engines: the matmul fabric wins, but the full pipeline
-    needs engineering to fuse and optimize equivalently.
-  \item Per-op energy advantage in deployed silicon: literature suggests
-    $\sim 25\%$ energy savings per ternary {MAC} versus binary, but we did
-    not measure this on physical hardware.
-  \item Quality preservation under arbitrary quantization: the substrate
-    preserves what the model was trained for. Post-training ternarization
-    on non-{QAT} models breaks quality.
+  \item \textbf{Throughput superiority of ternary arithmetic on binary
+    silicon.} The $1.90\times$ matmul-fabric speedup is a sub-byte
+    packing density result that a generic {INT2} kernel feeding
+    \texttt{\_\_dp4a} could in principle match. Our {ADD}-only kernel,
+    which exercises the truly ternary ``no multiplication'' property,
+    matches but does not exceed the \texttt{\_\_dp4a}-based packed
+    kernel. The ternary-arithmetic energy advantage requires custom
+    silicon to be observable; see \S\ref{sec:what-is-ternary}.
+  \item \textbf{Production wins at prefill regimes.} At $M \geq 16$,
+    cuBLAS tensor cores saturate and at $M \geq 64$ the hybrid dispatch
+    margin is only $\sim 1.04\times$. The substrate's strongest regime
+    is single-token gen.
+  \item \textbf{Quality preservation under post-training
+    ternarization.} For Llama 1B, the $0/16$ golden-token match
+    confirms that post-training quantization to ternary breaks
+    non-{QAT} models. Substrate-data alignment is genuine only for the
+    {QAT}-trained case (BitNet).
+  \item \textbf{Per-op energy advantage in deployed silicon.}
+    The literature \citep{horowitz-energy-2014,cutie-2020,cuevas-formal-2026}
+    supports $3.8$--$71.4\times$ ranges depending on process node, but
+    we have not measured this on physical hardware. {FPGA} prototype
+    is the next experiment.
+  \item \textbf{Novelty of the {LUT}-based / packed low-bit
+    technique.} {T-MAC} \citep{tmac-eurosys-2025}, {LUTMUL}
+    \citep{lutmul-aspdac-2025}, and {Platinum} \citep{platinum-2025}
+    are prior art for the principle that low-bit weights admit
+    {LUT}-based or packed implementations that outperform conventional
+    multiplication. Our contribution is the specific {GPU} packed-trit
+    \texttt{\_\_dp4a} kernel plus end-to-end engine integration plus
+    bit-exact validation, not the principle itself.
 \end{enumerate}
 
 \section{Implications for silicon investment}
@@ -742,19 +942,33 @@ The argument for custom ternary silicon historically rested on three
 pillars:
 
 \begin{itemize}
-  \item \textbf{Throughput}: now empirically supported---ternary
-    substrate beats binary {INT8} {TC} by $1.90\times$ even on existing
-    {GPU} silicon.
-  \item \textbf{Memory bandwidth}: now empirically supported---$8\times$
-    compression versus fp16, $5\times$ versus Q8\_0.
-  \item \textbf{Per-op energy}: still requires {FPGA} prototype to
-    measure.
+  \item \textbf{Throughput}: \emph{partially} supported on commodity
+    silicon. Packed sub-byte storage on consumer {GPU} (this work,
+    \cite{tmac-eurosys-2025} on {CPU}, \cite{lutmul-aspdac-2025} on
+    {FPGA}) captures the bandwidth-bound portion of the win at
+    single-token gen. As discussed in \S\ref{sec:what-is-ternary}, this
+    advantage is attributable to sub-byte packing density rather than
+    to ternary arithmetic itself; an {INT2} packing scheme would in
+    principle obtain similar throughput.
+  \item \textbf{Memory bandwidth}: empirically supported---$8\times$
+    compression versus fp16, $5\times$ versus Q8\_0. This is shared
+    with any sub-byte packed scheme; the ternary alphabet is one
+    instantiation.
+  \item \textbf{Per-op energy}: unmeasured here. The formal cost
+    analysis of \citet{cuevas-formal-2026} (Prop.~2) gives a lower
+    bound of $\rho_3 \geq 3.8\times$ in 45nm versus FP16; empirical
+    measurements in 7nm \citep{bitnet158-2024} report up to $71.4\times$.
+    This advantage is exclusively a property of the ternary {ALU},
+    not of the packed representation, and therefore cannot be captured
+    by binary {GPU} regardless of kernel sophistication. Closing this
+    argument requires {FPGA} or {ASIC} prototype measurement.
 \end{itemize}
 
-The throughput case \emph{no longer requires custom hardware to argue}:
-{INT8} tensor cores on a \$1500 {GPU} running ternary-optimized custom
-{CUDA} kernels already capture the substrate-data alignment win. This
-dilutes the silicon-investment {ROI} argument considerably.
+The throughput case for ternary substrates \emph{is not made by this
+paper}---it is made, to the extent that it is made on commodity
+silicon, by sub-byte packed kernels for which ternary is one valid
+instantiation. The silicon-investment argument for custom ternary
+hardware therefore reduces to the energy case, which remains open.
 
 The remaining specifically-silicon arguments are:
 
@@ -781,30 +995,42 @@ silicon investment case needs.
 
 \section{Conclusion}
 
-We built a balanced-ternary {CPU} simulator complete enough to run
+We built a balanced-ternary {CPU} simulator capable of running
 Llama 3.2 1B and BitNet b1.58 2B-4T end-to-end, validated three
 architectural hypotheses (Format B preserves Llama quality, Format A
 trit-budget tradeoff, BitNet substrate-data alignment), and ported the
-matmul fabric to {CUDA}. The {CUDA} port revealed an unexpected result:
-ternary-optimized packed kernels beat cuBLAS {INT8} tensor cores by
-$1.90\times$ on Llama 1B without using tensor cores, exploiting a
-structural property of packed-trit storage (1 byte yields 16 useful
-{MAC}s). A round-2 engineering pass on the end-to-end forward
-(\S\ref{sec:e2e}) translates the fabric win into production inference:
-$\mathbf{425}$ tokens/s on Llama 3.2 1B ($\mathbf{1.08\times}$ faster
-than \texttt{llama.cpp} {Q8\_0}) and $\mathbf{214}$ tokens/s on
-BitNet 2B-4T with $\mathbf{8/8}$ {BOS}-greedy tokens bit-exact against
-the \texttt{microsoft/BitNet} reference.
+matmul fabric to {CUDA}. The two engineering results this paper
+defends are: (a) end-to-end Llama 3.2 1B inference at $\mathbf{425}$
+tokens/s on {RTX 3090}, $\mathbf{1.08\times}$ faster than
+\texttt{llama.cpp} {Q8\_0}, via the round-2 fixes in \S\ref{sec:e2e};
+and (b) bit-exact reproduction of \texttt{microsoft/BitNet} 2B-4T at
+$\mathbf{214}$ tokens/s with $\mathbf{8/8}$ {BOS}-greedy tokens
+matching the reference. The matmul-fabric measurement that underlies
+(a)---$1.90\times$ over cuBLAS {INT8} {TC} at single-token gen---is
+attributable to packed sub-byte storage density rather than to
+ternary arithmetic per se, following the formal decomposition of
+\citet{cuevas-formal-2026} and confirmed by our own {ADD}-only
+experiment. We adopt that decomposition explicitly in
+\S\ref{sec:what-is-ternary}.
 
-The throughput case for ternary substrates no longer requires custom
-silicon to argue---and as of round 2, it no longer requires custom
-inference engines either. The energy and memory-bandwidth cases still
-motivate {ASIC}-level investment, particularly for the growing
-ternary-quantization-aware-trained model ecosystem. The remaining gap
-to close the silicon-investment argument is a {FPGA} prototype for
-J/op measurement: the simulator gives the operation-count multiplicand,
-the {FPGA} would give the energy-per-op multiplier, and the product is
-the system-level energy comparison the silicon-investment case needs.
+The throughput case for ternary substrates on commodity binary silicon
+is, on this evidence, equivalent to the case for any sub-byte packed
+representation that exploits memory bandwidth ($1.58$ bits per weight
+fits the same kernel template that {INT2} or any other two-bit scheme
+would fit). The case that remains specifically ternary is energetic:
+balanced-ternary {CMOS} circuits may save $25$--$71\%$ J/{MAC}
+relative to equivalent-precision binary
+\citep{horowitz-energy-2014,cutie-2020,cuevas-formal-2026}, but this
+paper does not measure it. The substrate simulator (F0--F11, AVX2
+backend, \texttt{libter\_k4.a} freestanding {C} {ABI}) was designed as
+the research vehicle for exactly that question; the {CUDA} port was
+an iteration aid. The next phase of the project is gate-level or
+{FPGA} prototyping of a balanced-ternary {ALU} versus a binary {ALU},
+which would supply the J/op multiplier that, combined with the
+operation-count multiplicand the simulator already gives, closes the
+silicon-investment argument. We thank Felipe Cuevas Araneda
+\citep{cuevas-formal-2026} for the formal analysis and critique that
+informed this revision.
 
 \section*{Reproduction}
 
@@ -854,7 +1080,7 @@ on the same {RTX 3090}. The {CUDA} \texttt{\_\_dp4a} intrinsic is the
 core acceleration primitive enabling the $1.90\times$ win
 \citep{cuda-dp4a, nvidia-ampere-arch}.
 
-\bibliographystyle{plain}
+\bibliographystyle{plainnat}
 \bibliography{references}
 
 \end{document}

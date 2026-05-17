@@ -153,3 +153,73 @@
   howpublished={\url{https://naranjositos.tech/brandon-tiny-paper.html}},
   year={2026}
 }
+
+% ---- Added 2026-05-15: prior art on LUT-based / low-bit / ternary acceleration,
+%      energy baselines, and external critique that motivated this revision. ----
+
+@inproceedings{horowitz-energy-2014,
+  title={1.1 Computing's Energy Problem (and What We Can Do about It)},
+  author={Horowitz, Mark},
+  booktitle={IEEE International Solid-State Circuits Conference (ISSCC)},
+  pages={10--14},
+  year={2014},
+  doi={10.1109/ISSCC.2014.6757323}
+}
+
+@article{ternary-weight-2016,
+  title={Ternary Weight Networks},
+  author={Li, Fengfu and Liu, Bin and Wang, Xiaoxing and Zhang, Bo and Yan, Junchi},
+  journal={arXiv preprint arXiv:1605.04711},
+  year={2016}
+}
+
+@inproceedings{tmac-eurosys-2025,
+  title={{T-MAC}: {CPU} Renaissance via Table Lookup for Low-Bit {LLM} Deployment on Edge},
+  author={Wei, Jianyu and Cao, Shijie and Cao, Ting and Ma, Lingxiao and Wang, Lei and Zhang, Yanyong and Yang, Mao},
+  booktitle={European Conference on Computer Systems (EuroSys)},
+  year={2025},
+  doi={10.1145/3689031.3696099}
+}
+
+@inproceedings{lutmul-aspdac-2025,
+  title={{LUTMUL}: Exceed Conventional {FPGA} Roofline Limit by {LUT}-Based Efficient Multiplication for Neural Network Inference},
+  author={Xie, Yanyue and Li, Zhengang and Diaconu, Dana and Handagala, Suranga and Leeser, Miriam and Lin, Xue},
+  booktitle={Asia and South Pacific Design Automation Conference (ASP-DAC)},
+  year={2025},
+  doi={10.1145/3658617.3697687}
+}
+
+@article{platinum-2025,
+  title={{Platinum}: Path-Adaptable {LUT}-Based Accelerator Tailored for Low-Bit Weight Matrix Multiplication},
+  author={Shan, Haoxuan and Guo, Cong and Wei, Chiyue and Cheng, Feng and Zhang, Junyao and Li, Hai Helen and Chen, Yiran},
+  journal={arXiv preprint arXiv:2511.21910},
+  year={2025}
+}
+
+@article{tellme-2025,
+  title={{TeLLMe}: An Energy-Efficient Ternary {LLM} Accelerator for Prefilling and Decoding on Edge {FPGAs}},
+  author={Qiao, Ye and Chen, Zhiheng and Zhang, Yifan and Wang, Yian and Huang, Sitao},
+  journal={arXiv preprint arXiv:2504.16266},
+  year={2025}
+}
+
+@article{prom-2025,
+  title={{PROM}: Prioritize Reduction of Multiplications over Lower Bit-Widths for Efficient {CNNs}},
+  author={Meiner, Lukas and Mehnert, Jens and Condurache, Alexandru Paul},
+  journal={arXiv preprint arXiv:2505.03254},
+  year={2025}
+}
+
+@article{cutie-2020,
+  title={{CUTIE}: Beyond {PetaOp/s/W} Ternary {DNN} Inference Acceleration with Better-Than-Binary Energy Efficiency},
+  author={Scherer, Moritz and Rutishauser, Georg and Cavigelli, Lukas and Benini, Luca},
+  journal={arXiv preprint arXiv:2011.01713},
+  year={2020}
+}
+
+@article{cuevas-formal-2026,
+  title={An{\'a}lisis de Eficiencia Energ{\'e}tica en Multiplicaci{\'o}n de Matrices con Pesos Discretizados: del R{\'e}gimen Ternario a la Extensi{\'o}n Quinaria v{\'\i}a Table Lookup},
+  author={Cuevas Araneda, Felipe},
+  note={Formal energy-cost analysis with $k=3$ optimality proof and {MAC}-to-{LUT} reduction; includes a critical review of this work that motivated the revisions made in this version of the paper.},
+  year={2026}
+}

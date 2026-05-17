@@ -1,25 +1,41 @@
 # ter
 
-Balanced ternary CPU simulator + SIMD extension. Runs Llama 3.2 1B Q8_0,
-BitNet b1.58 2B-4T, TinyStories Q4_K_M, and brandon-tiny end-to-end on a
-ternary kernel substrate. CUDA backend ports the matmul fabric to RTX 3090,
-where ternary-optimized packed kernels beat cuBLAS INT8 tensor cores by
-1.65-1.90× without using tensor cores.
+Balanced-ternary substrate simulator (F0–F11) that runs Llama 3.2 1B
+faster than llama.cpp Q8_0 and reproduces BitNet b1.58 2B-4T bit-exact
+at 1.58 bits/weight on consumer GPUs. The substrate simulator is the
+research vehicle; the CUDA port is an iteration aid for the matmul
+fabric.
 
-## TL;DR results
+## TL;DR results (two engineering claims, defendable end-to-end)
 
-- **Llama 3.2 1B Q8_0** end-to-end forward on the ternary substrate: finite
-  logits, op count parity 1.002× lane-MACs vs analytical fp16 baseline.
-- **BitNet b1.58 2B-4T** end-to-end forward with i2_s native quantization,
-  attn_sub_norm + ffn_sub_norm correctly wired.
-- **CUDA packed-trit kernel** beats cuBLAS INT8 TC on RTX 3090 at the
-  Llama 1B matmul fabric: 6.67 ms vs 12.67 ms = **1.90× faster**, with
-  per-shape wins up to 4.18× (Wdown).
-- **Memory footprint**: 8× compression vs fp16, 5× vs Q8_0; end-to-end
-  Llama 1B forward needs 33% less VRAM than INT8 baseline.
-- **Quality**: post-training BitNet quantization on Llama 1B Q8_0 (not
-  trained for ternary) breaks quality (argmax flips, 0/5 top-5 overlap);
-  Format A 11-trit (1+5+5) preserves argmax with RMSE 0.05.
+- **Llama 3.2 1B end-to-end:** **425 t/s on RTX 3090**, 1.08× faster than
+  llama.cpp Q8_0 (395 t/s reference). 28.9× over the v1 baseline.
+- **BitNet b1.58 2B-4T end-to-end:** **214 t/s, 8/8 BOS-greedy tokens
+  bit-exact** against the microsoft/BitNet llama-cli reference.
+- **Kernel correctness validated** three-way for Llama 1B: scalar NumPy
+  reference vs CUDA forward 16/16 bit-exact; fp32 weights (no
+  ternarization) vs Q8_0 golden 7/8; ternarized vs Q8_0 golden 0/16
+  (confirms H1: post-training ternarization breaks non-QAT models).
+- **Op-count parity** holds: 1.002× lane-MACs vs analytical fp16 baseline
+  (measured by the CPU simulator on Llama 1B).
+- **Memory**: 1.58 bits/weight (8× compression vs fp16, 5× vs Q8_0).
+
+### Underlying CUDA matmul-fabric measurement (with honest attribution)
+
+- Packed-trit kernel beats cuBLAS INT8 TC by **1.90×** on Llama 1B at
+  single-token gen (M=1), per-shape wins up to 4.18× on Wdown.
+  Attribution: this advantage is bandwidth-bound (one byte yields 16
+  MACs; ratio 0.94 vs 0.50 MACs/byte for INT8 ≈ 1.88×), not
+  ternary-arithmetic-bound. A generic INT2 packed kernel feeding `__dp4a`
+  would in principle obtain similar throughput. See paper Sec. 7.3
+  "What is and isn't ternary about this work" and Cuevas (2026) §5.2.
+- Our own ADD-only kernel (`mm_bitnet_addonly`) confirms: eliminating
+  multiplications matches but does not exceed `__dp4a`; the
+  TVMAC=0 architectural advantage of ternary needs custom silicon to
+  be observable, not commodity GPU.
+
+Full results: `docs/baselines/2026-05-10-cuda-synthesis.md`; paper
+`paper/ter_paper.pdf`.
 
 Full results: `docs/baselines/2026-05-10-cuda-synthesis.md`.
 
@@ -88,15 +104,20 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
 - [x] **F12.4** Packed-trit end-to-end forward: 4.2 t/s, 33% memory savings.
 - [x] **F12.5** RTX 3090 production baseline (llama.cpp Q8_0 Llama 3.2 1B, clean GPU): **395 t/s** reference (recalibrated 2026-05-15).
 - [x] **F12.6** Real-weight quality validation on Llama 1B (BitNet post-quant breaks).
-- [x] **F12.7** Ternary-optimized packed kernels:
+- [x] **F12.7** Packed-trit kernels on consumer GPU:
     - v4 wide → v6 dp4a → v7 colmaj → v8 warp → v10 unroll → v11 warp4 → v13
-    - Best-per-shape dispatch: **6.67 ms / 186 GMAC/s, 1.90× faster than INT8 TC**
+    - Best-per-shape dispatch: **6.67 ms / 186 GMAC/s, 1.90× over cuBLAS INT8 TC at M=1**
+    - Honest attribution (per Cuevas 2026 §5.2 + our own ADD-only experiment):
+      this advantage is bandwidth-bound (sub-byte packing density), not
+      ternary-arithmetic-bound. An INT2 packed kernel feeding `__dp4a` would
+      in principle obtain the same. Ternary-arithmetic energy advantage
+      requires custom silicon (FPGA/ASIC) to be observable.
 - [x] **F12.8** End-to-end forward optimization (round 2): **14.7 → 425 t/s (28.9×)**
     - Fix 1: device-pointer scale eliminates 65 D2H syncs/token → 28.9 t/s
     - Fix 2: forward kernel upgrade v4 → v11 warp-coop → 200.6 t/s
     - Fix 3: cudaGraph capture (all state on-device, entire forward as one graph) → 412 t/s
     - Fix 4: fused rmsnorm+quant + silu+quant (49 launches/token saved) → 425 t/s
-    - Result: **1.08× faster than llama.cpp Q8_0** on Llama 1B, RTX 3090, 1.58 bits/weight, no tensor cores.
+    - Result: **1.08× faster than llama.cpp Q8_0** on Llama 1B, RTX 3090, 1.58 bits/weight.
     - **Kernel correctness validated**: GGUF→packed converter + NumPy reference forward + CUDA `load_model_from_bin` path. CUDA matches NumPy reference **16/16 BOS-greedy tokens bit-exact**. Diverges from Llama Q8_0 golden (0/16) per H1 (ternarization breaks non-QAT models). Architecture sanity: with fp32 weights (no ternarization) reference matches Q8_0 golden 7/8.
 - [x] **F12.9** BitNet 2B-4T real-weight end-to-end forward: **214 t/s, 8/8 BOS-greedy tokens match reference**
     - GGUF i2_s converter: channel-interleaved 128-block, code mapping, per-tensor scales
@@ -118,29 +139,53 @@ The CUDA bench targets need a separate build with nvcc; see `cuda/`.
 | cuBLAS INT8 TC (production reference) | 12.67 | 98 |
 
 Total session-cumulative speedup vs Mac AVX2 baseline: **3,840×**.
-vs cuBLAS INT8 TC (binary substrate ceiling): **1.90× faster** without
-tensor cores.
+vs cuBLAS INT8 TC at M=1 gen on Llama 1B shapes: **1.90× faster** —
+attributable to packed sub-byte storage density rather than ternary
+arithmetic semantics (see paper Sec. 7.3 and Cuevas 2026 §5.2).
 
 ## What's proven vs what's engineering
 
-### Architecturally proven (paper claims)
-- Op count parity 1.002× lane-MACs vs fp16 (analytical).
-- Memory compression 8× vs fp16, 5× vs Q8_0 (measured).
-- Substrate-data alignment for BitNet: zero TVMAC at matmul fabric (analytical
-  + real GGUF forward verified).
-- Format A trit-budget tradeoff: 1+5+5 preserves quality on Llama 1B.
-- Wall-clock superiority over INT8 TC at the matmul fabric level
-  (1.90× faster on RTX 3090 with shape-aware kernel dispatch).
+### Engineering results defended end-to-end
+- **Llama 3.2 1B**: 425 t/s, 1.08× over llama.cpp Q8_0 on RTX 3090.
+  Kernel correctness validated bit-exact vs NumPy reference (16/16).
+- **BitNet b1.58 2B-4T**: 214 t/s, 8/8 BOS-greedy tokens bit-exact vs
+  microsoft/BitNet llama-cli — this is where substrate-data alignment
+  is semantically meaningful (QAT-trained ternary model).
 
-### Honest caveats
-- End-to-end inference engine wall-clock vs llama.cpp Q8_0: not validated
-  (a production-quality engine with kernel fusion + persistent attention is
-  separate engineering work; the matmul fabric win is proven, the rest is
-  engineering glue).
-- Quality preservation requires the model to be trained for the target
-  quantization (BitNet QAT). Post-training ternarization breaks quality.
-- Per-op energy (J/MAC ternary CMOS vs binary CMOS): requires FPGA prototype
-  to measure; the silicon-investment energy argument is theoretical without it.
+### Architecturally proven (substrate-level)
+- Op count parity 1.002× lane-MACs vs fp16 (CPU simulator, analytical).
+- Memory compression: 1.58 bits/weight; 8× vs fp16, 5× vs Q8_0.
+- Format A trit-budget tradeoff: 1+5+5 preserves Llama 1B argmax with
+  logit RMSE 0.05.
+- BitNet substrate-data alignment: TVMAC=0 in the matmul fabric
+  (analytical + real GGUF forward verified bit-exact).
+
+### What this paper does NOT claim (honest acknowledgments)
+- **Throughput superiority of ternary arithmetic on binary silicon.**
+  The 1.90× matmul win is a sub-byte packing density result; a generic
+  INT2 kernel would in principle match it. Our own ADD-only kernel
+  empirically matches `__dp4a` but does not exceed it.
+- **Production wins at prefill regimes (M ≥ 16)** — tensor cores
+  saturate; hybrid dispatch margin shrinks to ~1.04× at M=64.
+- **Quality under post-training ternarization** — 0/16 vs Llama Q8_0
+  golden confirms H1. Substrate-data alignment is genuine only for
+  QAT-trained models (BitNet).
+- **Per-op energy advantage in deployed silicon** — literature
+  (Horowitz 2014, CUTIE 2020, Cuevas 2026) supports the bound, but we
+  did not measure it. FPGA/ASIC prototype is the next experiment.
+- **Novelty of the LUT/packed-low-bit principle** — T-MAC (Wei et al.
+  EuroSys 2025), LUTMUL (Xie et al. ASPDAC 2025), Platinum (Shan et
+  al. 2025), TeLLMe (Qiao et al. 2025) all precede this work. Our
+  contribution is the specific GPU `__dp4a` packed-trit kernel design
+  + end-to-end engine integration + bit-exact validation.
+
+### Acknowledgment
+Felipe Cuevas Araneda's *Análisis de Eficiencia Energética en
+Multiplicación de Matrices con Pesos Discretizados* (mayo 2026)
+provides the formal energy-cost framework (Prop. 2: ρ₃ ≥ 3.8× bound
+in 45nm; Prop. 5: k=3 efficiency optimum; Prop. 6: MAC-to-LUT
+reduction) and a critical review that motivated the honest framing
+adopted in this revision.
 
 ## Building blocks
 
