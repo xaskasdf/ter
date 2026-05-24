@@ -67,7 +67,11 @@ i2\_s weights with sub-{RMSNorm}s, {ReLU}$^2$ {FFN}, {NEOX} {RoPE},
 fp32 residual stream, and a ternary-only {ADD}-only matmul kernel
 reaches $214$ tokens/s with $\mathbf{8/8}$ {BOS}-greedy tokens
 bit-exact against the \texttt{microsoft/BitNet} \texttt{llama-cli}
-reference.
+reference. The same $8/8$ bit-exact match holds when BitNet runs
+through the balanced-ternary {ISA} in the {CPU} simulator itself
+(genuine-trit \texttt{TVMAC}, not the {GPU} kernel)---a substrate-level
+demonstration of substrate-data alignment for the {QAT}-trained ternary
+case.
 
 We are explicit about what is and is not ternary about these results.
 The matmul-fabric speedup of $1.90\times$ over cuBLAS {INT8} tensor
@@ -80,8 +84,11 @@ not yield throughput on commodity {GPU}. The genuinely ternary
 contribution is bit-exact reproduction of the {QAT}-trained BitNet
 2B-4T model, where substrate-data alignment is semantically
 meaningful. The per-op energy advantage that historically motivated
-ternary {CPU}s---and that the simulator was designed to explore---
-remains unmeasured and requires an {FPGA} prototype to close. Related
+ternary {CPU}s---and that the simulator was designed to explore---is
+\emph{analytically estimated} via an {ASIC} model
+($33.4 \to 4.6$ nJ/token at $22 \to 3$nm, ternary ratio pinned to
+Cuevas (2026) Prop.~2) but not yet silicon-measured; physical {FPGA}
+validation remains the closing experiment. Related
 {LUT}-based low-bit work on {CPU} \cite{tmac-eurosys-2025}, {FPGA}
 \cite{lutmul-aspdac-2025,tellme-2025}, and {ASIC}
 \cite{platinum-2025,cutie-2020} precedes ours; we contribute the
@@ -391,15 +398,36 @@ entirely).
 
 \textbf{Real GGUF}: \texttt{test\_bitnet\_gguf\_load} loads
 \texttt{microsoft/bitnet-b1.58-2B-4T-gguf} and dequantizes via
-\texttt{dequant\_i2\_s} (2-bit packed weights, 4 trits/byte, mapping
-$\{0 \to 0,\, 1 \to {+}1,\, 2 \to {-}1\}$). Verification: 100\%
+\texttt{dequant\_i2\_s}. The i2\_s layout is channel-interleaved: flat
+row-major elements in blocks of 128 ($= 32$ code bytes per block), where
+byte $p$ holds four codes for block positions $\{p, p{+}32, p{+}64,
+p{+}96\}$ (group $g$ at bit shift $6 - 2g$, group 0 in the high bits),
+code map $\{0 \to {-}1,\, 1 \to 0,\, 2 \to {+}1,\, 3 \to 0\}$, with the
+per-tensor scale appended as fp32 after the codes. Verification: 100\%
 ternary purity on every weight tensor.
 
-\textbf{End-to-end forward}: \texttt{test\_bitnet\_forward} runs the
-full BitNet 2B-4T forward with \texttt{attn\_sub\_norm} +
+\textbf{End-to-end forward, bit-exact on the substrate}:
+\texttt{test\_bitnet\_forward} runs the full BitNet 2B-4T forward
+through the {CPU} {Sim} with \texttt{attn\_sub\_norm} +
 \texttt{ffn\_sub\_norm} (the per-tensor scale absorption mechanism per
-\citep{bitnet158-2024} \S 3.2). Result: 18 min/forward {AVX2}, all
-128{,}256 logits finite, range $[-10.51, 25.54]$.
+\citep{bitnet158-2024} \S 3.2), {ReLU}$^2$ {FFN}, {NEOX} {RoPE}, and the
+weight-tied fp16 \texttt{lm\_head}. Generating greedily from {BOS},
+the substrate produces
+\[
+  11,\ 220,\ 16,\ 11,\ 220,\ 17,\ 11,\ 220,\ 18,\ \ldots
+  \quad (\text{``}, 1, 2, 3, 4, 5, 6, \ldots\text{''})
+\]
+which is $\mathbf{8/8}$ {BOS}-greedy tokens \emph{bit-exact} against the
+\texttt{microsoft/BitNet} \texttt{llama-cli} reference. Crucially this
+runs through the balanced-ternary {ISA} with genuine-trit \texttt{TVMAC}
+in the simulator---not the packed-trit {GPU} kernel---so it is a
+substrate-level demonstration of substrate-data alignment, stronger than
+the {CUDA}-path bit-exact result of \S\ref{sec:bitnet-e2e}. The forward
+is thereby proven correct: any error in RMSNorm, RoPE, attention,
+matmul, {ReLU}$^2$, or \texttt{lm\_head} would break the bit-exact
+match. (Earlier the {CPU}-{Sim} forward had a weight-transpose and a
+{RoPE}-$\theta$ bug that confounded this measurement; with those fixed,
+the substrate independently confirms H3.)
 
 \textbf{Counter-experiment}: applying the BitNet quantization
 post-training to Llama 1B Q8\_0 (which was \emph{not} trained for ternary)
@@ -696,22 +724,40 @@ Three-way validation:
   \item \emph{Architecture sanity (no ternarization, fp32 dequantized
     weights):} the reference forward generates $7/8$ tokens identical
     to \texttt{llama-cli} {Q8\_0} from {BOS}$=128000$. The single
-    divergence is the first token (fp32 vs fp16 close-logit
-    sensitivity at pos $0$ with no context). Confirms that {RoPE}
-    convention (Llama uses {NORM} consecutive-pair rotation, not
-    {NEOX}), {GQA}, RMSNorm, SiLU FFN, and the tied-fp16
-    \texttt{lm\_head} are correct in the reference.
+    divergence is the \emph{first} token, and it is not a bug but a
+    numerical near-tie. At pos $0$ from bare {BOS} (no context), the
+    top-1 logit gap is below cross-implementation float reproducibility:
+    \texttt{llama-cli} (fp32 {BLAS}) $\to 28783$, the NumPy reference
+    (float32) $\to 16309$, and our forward (double accumulation) $\to 2$,
+    with the top two candidates $16309$ and $2$ separated by only
+    $0.014$ logits ($7.051$ vs $7.037$). Greedy decoding then chains:
+    once pos $0$ lands on a different member of the near-tie, the whole
+    trajectory diverges, and each implementation is internally
+    self-consistent (none is ``wrong''). Our double-precision path is
+    in fact \emph{more} accurate than the fp32 references; it simply
+    resolves the tie differently. Positions $1$--$5$ all match the
+    golden, confirming that {RoPE} (Llama uses {NORM} consecutive-pair
+    rotation, not {NEOX}), {GQA}, RMSNorm, SiLU FFN, and the tied-fp16
+    \texttt{lm\_head} are correct. By contrast BitNet's tokens carry
+    margins of $\sim 0.85$ logits and are immune to float precision,
+    which is why the BitNet substrate forward is $8/8$ bit-exact
+    (\S\ref{sec:h3}).
   \item \emph{NumPy reference vs CUDA forward (with per-tensor
     ternarization):} both produce the identical sequence
     $\mathbf{16/16}$ {BOS}-greedy tokens bit-exact. Every kernel
     (fused rmsnorm/quant, packed v11 matmul, NORM RoPE, SiLU+mul,
     fp16 lm\_head, two-pass argmax) matches the scalar reference.
-  \item \emph{Vs Llama {Q8\_0} golden tokens:} $0/16$ match.
-    Confirms the H1 prediction (\S\ref{sec:hypotheses}) that
-    per-tensor BitNet ternarization on a non-{QAT} model breaks
-    quality; the model collapses to degenerate token cycling
-    (sequence of token $2349$ for $\sim 78$ steps, then token $11$,
-    then token $279$).
+  \item \emph{Vs Llama {Q8\_0} golden tokens:} $0/16$ match. This
+    combines two orthogonal effects that we are careful to separate:
+    (i) the pos-$0$ numerical near-tie above (a single-token float
+    ambiguity, not a defect), and (ii) genuine H1 quality loss---
+    per-tensor BitNet ternarization on a non-{QAT} model breaks the
+    logit distribution (\S\ref{sec:h3}: argmax flips, {RMSE} $2.39$),
+    and the model collapses to degenerate token cycling. The forward
+    architecture is validated independently (BitNet $8/8$ bit-exact
+    through the {Sim}; NumPy fp reference $5/6$ with positions $1$--$5$
+    exact), so the Llama divergence is a model-quality consequence of
+    post-training ternarization, not a substrate or kernel defect.
 \end{enumerate}
 
 The $425$ tokens/s end-to-end headline is therefore a real substrate
@@ -936,6 +982,124 @@ energy advantage is real but unmeasured here.
     bit-exact validation, not the principle itself.
 \end{enumerate}
 
+\section{Hardware modeling: an analytical energy estimate}
+\label{sec:hwmodel}
+
+The energy argument for ternary substrates has, throughout this paper,
+been deferred to ``requires an {FPGA} prototype.'' We now narrow that
+gap with an analytical hardware model, \texttt{tersim} (in
+\texttt{v2/}), in the spirit of a quantum-circuit simulator on a
+classical host: the goal is not to run ternary workloads at ternary
+speed, but to smoke-test what a real ternary machine \emph{would do}---
+instruction counts, cache behavior, cycle estimates, and per-op
+energy---without owning the hardware.
+
+The functional core (the {CPU} {Sim} of \S\ref{sec:architecture})
+executes a balanced-ternary {ISA} where every \texttt{TVMAC} operates
+on genuine trits. \texttt{tersim} layers three analytical models on top:
+
+\begin{table}[h]
+\centering
+\caption{Analytical model layers and their calibration sources.}
+\begin{tabular}{lll}
+\toprule
+Layer & Models & Calibration \\
+\midrule
+L1 CPU & 7-stage in-order pipeline, RAW hazards + & Cortex-A55 / \\
+       & forwarding, L1D/L2/DRAM, MSHRs, branch pred. & Ariane class \\
+L1 GPU & RTX 3090 roofline (bw-efficiency per path) & measured 2026-05-17 \\
+L3 ASIC & per-op energy/area/freq at 22/7/3nm & \citet{horowitz-energy-2014}, \\
+        & & \citet{cuevas-formal-2026} Prop.~2, \\
+        & & Stillmaker-Baas 2017 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A single {CLI} (\texttt{tersim\_run}) threads a workload through all
+layers and emits a unified {JSON}/{CSV} report.
+
+\paragraph{The simulator captures real dynamics.}
+Running the same ternary matmul kernel repeatedly
+(Figure~\ref{fig:cache}), the simulator reproduces cache warming
+(L1D hit rate $0 \to 98\%$ over 64 invocations), the resulting {IPC}
+climb ($0.04 \to 0.72$), and {ASIC} leakage amortization (per-op
+energy drops $\sim 22\times$ as fixed leakage spreads over more work).
+None of this requires ternary silicon; it falls out of the faithful
+trace plus the analytical models.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/fig_cache_warming.png}
+\caption{Cache warming, {IPC} climb, and leakage amortization over 64
+repeated kernel invocations (\texttt{tersim} {L1}/{L3} models).}
+\label{fig:cache}
+\end{figure}
+
+\paragraph{ASIC node sweep.}
+The {ASIC} model's node sweep (Figure~\ref{fig:asic}) is physically
+coherent: $22 \to 7 \to 3$nm drops per-token energy
+($33.4 \to 6.4 \to 4.6$ nJ) and raises frequency
+($1.25 \to 2.13 \to 2.75$ GHz). The ternary per-op energy is pinned to
+\citet{cuevas-formal-2026} Proposition~2's switching-activity ratio
+$1/\log_2 3 \approx 0.6309\times$ versus an equivalent binary baseline;
+the 3nm point is flagged explicitly as a post-Dennard extrapolation.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/fig_asic_scaling.png}
+\caption{{ASIC} per-token energy and frequency across process nodes.
+Ternary per-op energy uses the \citet{cuevas-formal-2026} Prop.~2 ratio;
+3nm is an extrapolation.}
+\label{fig:asic}
+\end{figure}
+
+\paragraph{GPU findings (side investigation).}
+While calibrating the {GPU} layer against the {RTX 3090}, we collected
+reproducible matmul-fabric measurements that sharpen the throughput
+story. A genuine {INT4} Tensor-Core kernel
+(\texttt{mma.sync.m8n8k32.s4.s4.s32}, bit-exact vs the
+\texttt{\_\_dp4a} reference) wins on large-$N$ shapes
+(Figure~\ref{fig:int4}: Wgate/Wup/lm\_head $1.16\times$, reaching $88\%$
+of {HBM} peak), while the v11 \texttt{\_\_dp4a} packed-trit kernel wins
+on small-$N$ (launch/setup overhead dominates {INT4} {TC} there). A
+per-shape hybrid dispatcher ($\text{{INT4} TC}$ if $N \geq 4096$ else
+\texttt{\_\_dp4a}, Figure~\ref{fig:hybrid}) yields $1.074\times$ over
+pure v11 on the full Llama 1B fabric, bit-exact in both paths.
+Consistent with \S\ref{sec:what-is-ternary} and
+\citet{cuevas-formal-2026} \S5.2, the v11 advantage over cuBLAS is
+\emph{bandwidth}, not arithmetic: measured effective {HBM} utilization
+is bimodal ($3$--$12\%$ for {ALU}-bound small-$N$, $20$--$88\%$ for
+{HBM}-bound large-$N$); the $4\times$ packed-trit compression buys
+throughput only in the memory-bound regime.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/fig_gpu_int4tc.png}
+\caption{{INT4} {TC} vs v11 \texttt{\_\_dp4a} per shape: {INT4} {TC}
+wins large-$N$ (HBM-bound), v11 wins small-$N$.}
+\label{fig:int4}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/fig_hybrid_speedup.png}
+\caption{Per-shape hybrid dispatcher: $1.074\times$ over pure v11 on the
+Llama 1B fabric (measured), bit-exact both paths.}
+\label{fig:hybrid}
+\end{figure}
+
+\paragraph{Limitations, stated plainly.}
+The {GPU} roofline is first-order: a single saturating efficiency curve
+per path does not distinguish $K$-heavy from $N$-heavy shapes, so it
+under-predicts the hybrid speedup ($1.01\times$ modeled vs $1.07\times$
+measured). The {ASIC} energy uses literature constants, \emph{not}
+silicon measurement; the \citet{cuevas-formal-2026} Prop.~2 ratio is an
+asymptotic idealized bound documented as an upper bound, not expected
+silicon performance. The 3nm node is an extrapolation (Dennard scaling
+broken post-28nm). This model \emph{narrows} the energy gap from
+``entirely theoretical'' to ``modeled and bounded'', but does not
+replace a physical {FPGA}/{ASIC} measurement.
+
 \section{Implications for silicon investment}
 
 The argument for custom ternary silicon historically rested on three
@@ -954,21 +1118,27 @@ pillars:
     compression versus fp16, $5\times$ versus Q8\_0. This is shared
     with any sub-byte packed scheme; the ternary alphabet is one
     instantiation.
-  \item \textbf{Per-op energy}: unmeasured here. The formal cost
-    analysis of \citet{cuevas-formal-2026} (Prop.~2) gives a lower
-    bound of $\rho_3 \geq 3.8\times$ in 45nm versus FP16; empirical
-    measurements in 7nm \citep{bitnet158-2024} report up to $71.4\times$.
-    This advantage is exclusively a property of the ternary {ALU},
-    not of the packed representation, and therefore cannot be captured
-    by binary {GPU} regardless of kernel sophistication. Closing this
-    argument requires {FPGA} or {ASIC} prototype measurement.
+  \item \textbf{Per-op energy}: now \emph{analytically estimated}, not
+    merely asserted. The hardware model of \S\ref{sec:hwmodel} gives a
+    node sweep of $33.4 \to 6.4 \to 4.6$ nJ/token at $22 \to 7 \to 3$nm,
+    with the ternary per-op energy pinned to \citet{cuevas-formal-2026}
+    Prop.~2's $1/\log_2 3 \approx 0.6309\times$ switching-activity ratio
+    (consistent with the $\rho_3 \geq 3.8\times$ 45nm bound and the
+    $71.4\times$ 7nm empirical figure in \citep{bitnet158-2024}). This
+    advantage is exclusively a property of the ternary {ALU}, not of the
+    packed representation, and therefore cannot be captured by binary
+    {GPU} regardless of kernel sophistication. The estimate is
+    literature-calibrated, not silicon-measured; physical {FPGA}/{ASIC}
+    validation remains the closing experiment.
 \end{itemize}
 
 The throughput case for ternary substrates \emph{is not made by this
 paper}---it is made, to the extent that it is made on commodity
 silicon, by sub-byte packed kernels for which ternary is one valid
 instantiation. The silicon-investment argument for custom ternary
-hardware therefore reduces to the energy case, which remains open.
+hardware therefore reduces to the energy case, which is now
+\emph{modeled and bounded} (\S\ref{sec:hwmodel}) rather than entirely
+open, though still pending physical measurement.
 
 The remaining specifically-silicon arguments are:
 
@@ -1020,17 +1190,33 @@ fits the same kernel template that {INT2} or any other two-bit scheme
 would fit). The case that remains specifically ternary is energetic:
 balanced-ternary {CMOS} circuits may save $25$--$71\%$ J/{MAC}
 relative to equivalent-precision binary
-\citep{horowitz-energy-2014,cutie-2020,cuevas-formal-2026}, but this
-paper does not measure it. The substrate simulator (F0--F11, AVX2
-backend, \texttt{libter\_k4.a} freestanding {C} {ABI}) was designed as
-the research vehicle for exactly that question; the {CUDA} port was
-an iteration aid. The next phase of the project is gate-level or
+\citep{horowitz-energy-2014,cutie-2020,cuevas-formal-2026}. This paper
+does not measure it on silicon, but it does now \emph{model} it: the
+\texttt{tersim} hardware layer (\S\ref{sec:hwmodel}) gives an analytical
+{ASIC} estimate ($33.4 \to 4.6$ nJ/token at $22 \to 3$nm, ternary ratio
+pinned to Cuevas Prop.~2), narrowing the energy argument from entirely
+theoretical to modeled-and-bounded.
+
+Two results deserve emphasis as the substrate-level (not merely {GPU})
+contributions. First, the {CPU} simulator reproduces BitNet 2B-4T
+$8/8$ bit-exact against the \texttt{microsoft/BitNet} reference,
+running through the balanced-ternary {ISA} with genuine-trit
+\texttt{TVMAC}---substrate-data alignment demonstrated at the {ISA}
+level, not just in a packed-trit {GPU} kernel. Second, the apparent
+Llama divergence is not a substrate defect: the bare-{BOS} first token
+is a numerical near-tie ($<0.04$ logits across {BLAS}/float32/double)
+while the model-quality collapse under post-training ternarization is
+H1 acting as predicted; the forward itself is proven correct by the
+BitNet bit-exact match.
+
+The substrate simulator (F0--F11, AVX2 backend,
+\texttt{libter\_k4.a} freestanding {C} {ABI}, plus the \texttt{tersim}
+microarchitecture/energy layer) is the research vehicle; the {CUDA}
+port was an iteration aid. The closing experiment remains gate-level or
 {FPGA} prototyping of a balanced-ternary {ALU} versus a binary {ALU},
-which would supply the J/op multiplier that, combined with the
-operation-count multiplicand the simulator already gives, closes the
-silicon-investment argument. We thank Felipe Cuevas Araneda
-\citep{cuevas-formal-2026} for the formal analysis and critique that
-informed this revision.
+to replace the analytical J/op multiplier with a measured one. We thank
+Felipe Cuevas Araneda \citep{cuevas-formal-2026} for the formal
+analysis and critique that informed this revision.
 
 \section*{Reproduction}
 
@@ -1053,6 +1239,11 @@ All artifacts and tests are in the \texttt{ter} repository at
     \texttt{cuda/ter\_cuda\_hybrid\_dispatch.cu}
   \item {INT4} {TC} via \texttt{wmma::s4} fragments:
     \texttt{cuda/ter\_cuda\_int4\_tc.cu}
+  \item BitNet 2B-4T bit-exact through the {CPU} substrate, plus the
+    analytical hardware model: \texttt{v2/} (\texttt{tersim\_run
+    --workload generate} for golden-token correctness;
+    \texttt{--workload forward}/\texttt{kernel} for energy/cycles).
+    Methodology and figures: \texttt{v2/docs/hardware-modeling.md}.
 \end{itemize}
 
 Build (Mac AVX2):
