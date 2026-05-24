@@ -4,12 +4,19 @@
 #include <ter/counters.hpp>
 #include <ter/isa.hpp>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace ter {
 
 class Sim {
 public:
+    // Tracer: optional post-retire callback used by the v2 microarch simulator
+    // (tersim) to capture an instruction-level trace without persisting it.
+    // Signature: (pc_of_executed_instr, decoded_instr, sim_state_after_exec).
+    // Default-empty std::function — zero cost when unset.
+    using Tracer = std::function<void(std::uint64_t, const Instr&, const Sim&)>;
+
     explicit Sim(size_t mem_words) : mem_(mem_words) {}
 
     Memory&           mem()         noexcept { return mem_; }
@@ -18,6 +25,9 @@ public:
     const RegFile&    regs()  const noexcept { return regs_; }
     OpCounters&       counters()       noexcept { return counters_; }
     const OpCounters& counters() const noexcept { return counters_; }
+
+    void set_tracer(Tracer t) noexcept { tracer_ = std::move(t); }
+    const Tracer& tracer() const noexcept { return tracer_; }
 
     void step();
     void run();
@@ -33,6 +43,7 @@ private:
     Memory mem_;
     RegFile regs_;
     OpCounters counters_;
+    Tracer tracer_;
 };
 
 }

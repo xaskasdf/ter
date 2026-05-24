@@ -10,6 +10,7 @@ void Sim::step() {
     regs_.set_pc(Word27::from_int(pc.to_int() + 1));
     Instr i = decode(raw);
     run_one(i);
+    if (tracer_) tracer_(static_cast<std::uint64_t>(pc.to_int()), i, *this);
 }
 
 void Sim::run() {

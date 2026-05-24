@@ -28,12 +28,16 @@ add_library(ter)
 target_compile_options(ter PRIVATE
     -Wall -Wextra -Wpedantic -Werror
     -O3 -mavx2 -mfma)
-target_include_directories(ter PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(ter PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_subdirectory(src)
 add_subdirectory(vendor/ntransformer)
 
-enable_testing()
-add_subdirectory(tests)
+# Only register tests when ter is the top-level project (not when consumed
+# via add_subdirectory from v2/ or other downstream).
+if(CMAKE_PROJECT_NAME STREQUAL "ter")
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 add_executable(dump_gguf_tensors tools/dump_gguf_tensors.cpp)
 target_link_libraries(dump_gguf_tensors PRIVATE nt_infra)
@@ -52,5 +56,5 @@ target_compile_definitions(ter_k4 PRIVATE TER_FREESTANDING)
 # Memory and RegFile bounds violations call std::abort() instead of throwing
 # under TER_FREESTANDING (see headers). Hosted-mode tests still get the
 # throw path so doctest can introspect failures.
-target_include_directories(ter_k4 PUBLIC ${CMAKE_SOURCE_DIR}/include)
+target_include_directories(ter_k4 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(ter_k4 PUBLIC ter)
