@@ -21,6 +21,11 @@ namespace {
 void mm_row_fp(const std::vector<float>& x, const TritTensor& Wt,
                int K, int N, std::vector<float>& out) {
     out.assign(static_cast<size_t>(N), 0.0f);
+    // Double accumulation (more accurate than the fp32 reference). Note: at
+    // near-tie argmax decisions on heavily-cancelled small outputs, sequential
+    // double / fp32 / BLAS-pairwise can each pick a different (equally valid)
+    // winner — this is cross-implementation numerical irreproducibility, not an
+    // error. Robust-margin tokens (e.g. BitNet) are unaffected and match exactly.
     std::vector<double> acc(static_cast<size_t>(N), 0.0);
     const bool is_fp32  = !Wt.fp32.empty();
     const bool blocked  = !Wt.block_scales.empty();
