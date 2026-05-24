@@ -34,17 +34,30 @@ TEST_CASE("dequant_f32 is identity") {
     for (std::size_t i = 0; i < in.size(); ++i) CHECK(out[i] == in[i]);
 }
 
-TEST_CASE("dequant_i2_s on hand-crafted bytes") {
-    // Mapping: 0->0, 1->+1, 2->-1, 3->0
-    // Byte 0x24 = 0b00100100 -> nibbles (LSB pair first): 00 01 10 00
-    //                                                    -> 0, +1, -1, 0
-    // Byte 0xB1 = 0b10110001 -> nibbles: 01 00 11 10
-    //                                  -> +1, 0, 0, -1
-    std::uint8_t bytes[2] = {0x24, 0xB1};
-    float out[8];
-    dequant_i2_s(bytes, 8, out);
-    CHECK(out[0] == 0.0f);  CHECK(out[1] == +1.0f); CHECK(out[2] == -1.0f); CHECK(out[3] == 0.0f);
-    CHECK(out[4] == +1.0f); CHECK(out[5] == 0.0f);  CHECK(out[6] == 0.0f);  CHECK(out[7] == -1.0f);
+TEST_CASE("dequant_i2_s channel-interleaved 128-block with per-tensor scale") {
+    // microsoft/BitNet i2_s layout (validated: BitNet 2B-4T forward is 8/8
+    // bit-exact vs llama-cli with this decode):
+    //   - flat row-major elements in BLOCKS of 128 -> 32 code bytes per block.
+    //   - byte p (p=0..31) holds 4 codes for block positions {p,p+32,p+64,p+96};
+    //     group g (position p + g*32) at bit shift (6 - g*2), group 0 in HIGH bits.
+    //   - code map: 0 -> -1, 1 -> 0, 2 -> +1, 3 -> 0.
+    //   - per-tensor scale appended as fp32 right after the codes (byte n_elems/4).
+    constexpr int N = 128;
+    std::uint8_t buf[32 + sizeof(float)];
+    // All code bytes = 0b00_01_10_11 = 0x1B:
+    //   g0 (shift 6) = 0 -> -1   (positions  0..31)
+    //   g1 (shift 4) = 1 ->  0   (positions 32..63)
+    //   g2 (shift 2) = 2 -> +1   (positions 64..95)
+    //   g3 (shift 0) = 3 ->  0   (positions 96..127)
+    for (int p = 0; p < 32; ++p) buf[p] = 0x1B;
+    const float scale = 2.0f;
+    std::memcpy(buf + 32, &scale, sizeof(float));
+    float out[N];
+    dequant_i2_s(buf, N, out);
+    for (int i = 0;  i < 32;  ++i) CHECK(out[i] == -2.0f);
+    for (int i = 32; i < 64;  ++i) CHECK(out[i] ==  0.0f);
+    for (int i = 64; i < 96;  ++i) CHECK(out[i] == +2.0f);
+    for (int i = 96; i < 128; ++i) CHECK(out[i] ==  0.0f);
 }
 
 TEST_CASE("dequant_q6_k on a hand-crafted constant block") {
