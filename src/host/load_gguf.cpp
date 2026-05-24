@@ -10,7 +10,8 @@ namespace ter::host {
 
 ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem,
                                bool format_a_roundtrip, int format_a_mant_trits,
-                               bool bitnet_roundtrip) {
+                               bool bitnet_roundtrip, int block_size,
+                               bool transpose_2d, bool store_fp32) {
     if (t.device() != nt::Device::CPU) {
         throw std::runtime_error("tensor_to_trit: input must be on CPU");
     }
@@ -72,7 +73,41 @@ ter::TritTensor tensor_to_trit(const nt::Tensor& t, int n_trits_per_elem,
         }
     }
 
-    // Quantize via ter::quantize().
+    // GGUF/ggml stores a linear weight as [out][in] row-major (ne0=in fastest,
+    // ne1=out). mm_row expects [in][out] (Wp[k*N+j], k=in, j=out). Transpose
+    // here so the projection weights match mm_row's contract. token_embd /
+    // lm_head are consumed as [out][in] directly (embed gather + lm_head
+    // double-loop), so they pass transpose_2d=false.
+    if (transpose_2d && shape_int.size() == 2) {
+        const int d0 = shape_int[0];   // ne0 = in  = K
+        const int d1 = shape_int[1];   // ne1 = out = N
+        std::vector<float> tr(n_elems);
+        for (int o = 0; o < d1; ++o)        // out (outer in source [out][in])
+            for (int i = 0; i < d0; ++i)    // in
+                tr[static_cast<std::size_t>(i) * static_cast<std::size_t>(d1)
+                   + static_cast<std::size_t>(o)] =
+                    tmp[static_cast<std::size_t>(o) * static_cast<std::size_t>(d0)
+                        + static_cast<std::size_t>(i)];
+        tmp.swap(tr);
+        // Payload is now [in][out] = [K][N] row-major.
+    }
+
+    // fp32 reference mode: store the (transposed) float weights directly,
+    // skip quantization entirely. Used to validate the forward at true FP.
+    if (store_fp32) {
+        ter::TritTensor t_out;
+        t_out.dtype = ter::DType::TritFP_B;
+        t_out.n_trits_per_elem = n_trits_per_elem;
+        t_out.shape = shape_int;
+        t_out.fp32 = std::move(tmp);
+        return t_out;
+    }
+
+    // Quantize via ter::quantize() (per-tensor) or quantize_blocked() when a
+    // per-block scale is requested.
+    if (block_size > 0) {
+        return ter::quantize_blocked(tmp.data(), shape_int, n_trits_per_elem, block_size);
+    }
     return ter::quantize(tmp.data(), shape_int, n_trits_per_elem);
 }
 

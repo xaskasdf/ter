@@ -112,18 +112,36 @@ void dequant_q6_k(const void* src, std::size_t n_elems, float* out) {
 }
 
 void dequant_i2_s(const void* src, std::size_t n_elems, float* out) {
-    // 2-bit packed: 4 weights per byte. Mapping per microsoft/BitNet:
-    //   0b00 -> 0, 0b01 -> +1, 0b10 -> -1, 0b11 -> 0 (sentinel; treat as 0).
-    static const float LUT[4] = { 0.0f, +1.0f, -1.0f, 0.0f };
+    // microsoft/BitNet i2_s layout (matches tools/convert_bitnet_to_packed.py,
+    // validated against the 8/8-correct CUDA forward):
+    //   - flat row-major elements in BLOCKS of 128 → 32 bytes per block.
+    //   - byte p (p=0..31) holds 4 codes for block positions {p, p+32, p+64,
+    //     p+96}; group g (position p + g*32) lives at bit shift (6 - g*2)
+    //     (i.e. group 0 in the HIGH bits).
+    //   - code map: 0 -> -1, 1 -> 0, 2 -> +1, 3 -> 0.
+    // Per-tensor scale: microsoft appends 8 fp32 (32 bytes) right after the
+    // codes; the first is the i2_scale (codes occupy n_elems/4 bytes). The
+    // model is mmap'd full-file so the trailer is in-bounds. Applying it here
+    // recovers the real weight magnitudes (scale × {-1,0,+1}).
+    static const float LUT[4] = { -1.0f, 0.0f, +1.0f, 0.0f };
     const std::uint8_t* bytes = static_cast<const std::uint8_t*>(src);
-    std::size_t n_bytes = n_elems / 4;
-    for (std::size_t b = 0; b < n_bytes; ++b) {
-        std::uint8_t v = bytes[b];
-        out[b * 4 + 0] = LUT[(v >> 0) & 3];
-        out[b * 4 + 1] = LUT[(v >> 2) & 3];
-        out[b * 4 + 2] = LUT[(v >> 4) & 3];
-        out[b * 4 + 3] = LUT[(v >> 6) & 3];
+    float i2_scale = 1.0f;
+    std::memcpy(&i2_scale, bytes + n_elems / 4, sizeof(float));
+    const std::size_t n_blocks = n_elems / 128;
+    for (std::size_t blk = 0; blk < n_blocks; ++blk) {
+        const std::uint8_t* bb = bytes + blk * 32;
+        for (int p = 0; p < 32; ++p) {
+            const std::uint8_t v = bb[p];
+            for (int g = 0; g < 4; ++g) {
+                const int shift = 6 - g * 2;
+                out[blk * 128 + static_cast<std::size_t>(g) * 32
+                    + static_cast<std::size_t>(p)] = LUT[(v >> shift) & 3] * i2_scale;
+            }
+        }
     }
+    // Tail (n_elems not a multiple of 128): zero-fill. BitNet weight dims are
+    // all multiples of 128, so this is defensive only.
+    for (std::size_t i = n_blocks * 128; i < n_elems; ++i) out[i] = 0.0f;
 }
 
 void dequant_q4_k_m(const void* src, std::size_t n_elems, float* out) {

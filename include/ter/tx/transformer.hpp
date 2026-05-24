@@ -45,6 +45,8 @@ struct BrandonTransformer {
     bool use_value_residual = false;
     bool weight_tying = false;
     float rmsnorm_eps = 1e-5f;
+    float rope_theta  = 10000.0f;   // Llama 3.2 uses 500000; from cfg at load
+    bool  ffn_relu2   = false;      // BitNet 2B-4T uses ReLU²·up; Llama uses SiLU·up
     std::vector<int> layer_map;   // size = n_layers; values in [0, blocks.size())
 };
 
@@ -84,7 +86,9 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader,
                                           int n_trits = 9,
                                           bool format_a_roundtrip = false,
                                           int format_a_mant_trits = 9,
-                                          bool bitnet_roundtrip = false);
+                                          bool bitnet_roundtrip = false,
+                                          int block_size = 0,
+                                          bool store_fp32 = false);
 
 // Load microsoft/bitnet-b1.58-2B-4T-gguf (or any bitnet-b1.58 arch GGUF).
 // Differs from load_llama_transformer in two ways:

@@ -161,7 +161,7 @@ TEST_CASE("forward_layer matches numpy reference within bounded rel_err") {
 
     std::vector<float> hidden_out;
     forward_layer(s, kt, L, cache, hidden_in, /*pos*/0,
-                  H, HD, Hn, Kn, I, 1e-6f, luts, hidden_out);
+                  H, HD, Hn, Kn, I, 1e-6f, 10000.0, false, luts, hidden_out);
 
     REQUIRE(hidden_out.size() == static_cast<size_t>(H));
 

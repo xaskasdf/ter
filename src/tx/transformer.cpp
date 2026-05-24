@@ -14,8 +14,11 @@ namespace {
 // Quantize an nt::Tensor to TritTensor via the F5.4a bridge with configurable
 // trit width and optional Format A round-trip applied to the float buffer.
 TritTensor quant_t(const nt::Tensor& t, int n_trits, bool format_a = false,
-                   int format_a_mant_trits = 9, bool bitnet = false) {
-    return ter::host::tensor_to_trit(t, n_trits, format_a, format_a_mant_trits, bitnet);
+                   int format_a_mant_trits = 9, bool bitnet = false,
+                   int block_size = 0, bool transpose_2d = false,
+                   bool store_fp32 = false) {
+    return ter::host::tensor_to_trit(t, n_trits, format_a, format_a_mant_trits,
+                                     bitnet, block_size, transpose_2d, store_fp32);
 }
 
 // Read a float-typed tensor (F32) into a flat vector. The brandon norm/dwa weights
@@ -37,15 +40,18 @@ std::vector<float> as_floats(const nt::Tensor& t) {
 // Build one block's LayerWeights from the loader's named tensors.
 LayerWeights build_block(const nt::GGUFLoader& loader, int b, int n_trits,
                          bool format_a = false, int format_a_mant_trits = 9,
-                         bool bitnet = false) {
+                         bool bitnet = false, int block_size = 0,
+                         bool store_fp32 = false) {
     auto pfx = std::string("blk.") + std::to_string(b) + ".";
-    auto Wq        = quant_t(loader.get_tensor(pfx + "attn_q.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
-    auto Wk        = quant_t(loader.get_tensor(pfx + "attn_k.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
-    auto Wv        = quant_t(loader.get_tensor(pfx + "attn_v.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
-    auto Wo        = quant_t(loader.get_tensor(pfx + "attn_output.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
-    auto Wgate     = quant_t(loader.get_tensor(pfx + "ffn_gate.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
-    auto Wup       = quant_t(loader.get_tensor(pfx + "ffn_up.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
-    auto Wdown     = quant_t(loader.get_tensor(pfx + "ffn_down.weight"), n_trits, format_a, format_a_mant_trits, bitnet);
+    // Projection weights are ggml [out][in]; transpose to [in][out] for mm_row.
+    const bool tr = true;
+    auto Wq        = quant_t(loader.get_tensor(pfx + "attn_q.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
+    auto Wk        = quant_t(loader.get_tensor(pfx + "attn_k.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
+    auto Wv        = quant_t(loader.get_tensor(pfx + "attn_v.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
+    auto Wo        = quant_t(loader.get_tensor(pfx + "attn_output.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
+    auto Wgate     = quant_t(loader.get_tensor(pfx + "ffn_gate.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
+    auto Wup       = quant_t(loader.get_tensor(pfx + "ffn_up.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
+    auto Wdown     = quant_t(loader.get_tensor(pfx + "ffn_down.weight"), n_trits, format_a, format_a_mant_trits, bitnet, block_size, tr, store_fp32);
     auto attn_norm = as_floats(loader.get_tensor(pfx + "attn_norm.weight"));
     auto ffn_norm  = as_floats(loader.get_tensor(pfx + "ffn_norm.weight"));
 
@@ -77,6 +83,7 @@ BrandonTransformer load_brandon_transformer(const nt::GGUFLoader& loader, int ma
     tx.intermediate_size = cfg.intermediate_size;
     tx.n_layers          = cfg.n_layers;        // == compute_layer_count for brandon
     tx.rmsnorm_eps       = cfg.norm_eps;
+    tx.rope_theta        = cfg.rope_theta;
     tx.n_registers       = b.n_registers;
     tx.use_dwa           = b.use_dwa;
     tx.use_value_residual = b.use_value_residual;
@@ -130,7 +137,7 @@ std::vector<float> forward_token(
             throw std::runtime_error("forward_token: token_id out of range");
         }
         // Token embedding lookup. token_embd payload is row-major (vocab_size rows, H cols).
-        emb_full.resize(tx.token_embd.payload.size());
+        emb_full.resize(tx.token_embd.num_elems());
         ter::dequantize(tx.token_embd, emb_full.data());
         for (int i = 0; i < H; ++i) {
             hidden[static_cast<size_t>(i)] =
@@ -159,7 +166,7 @@ std::vector<float> forward_token(
             sim, kt, tx.blocks[static_cast<size_t>(b_idx)], tx.kv_caches[static_cast<size_t>(L)],
             hidden, pos,
             tx.hidden_size, tx.head_dim, tx.n_heads, tx.n_kv_heads,
-            tx.intermediate_size, tx.rmsnorm_eps, luts,
+            tx.intermediate_size, tx.rmsnorm_eps, tx.rope_theta, tx.ffn_relu2, luts,
             hidden_out, state, L);
         hidden = hidden_out;
     }
@@ -191,7 +198,7 @@ std::vector<float> forward_token(
     // output cell * vocab_size cells.
     const float* W_lm = nullptr;
     std::vector<float> lm_full;
-    if (!tx.lm_head.payload.empty()) {
+    if (!tx.lm_head.payload.empty() || !tx.lm_head.fp32.empty()) {
         lm_full.resize(tx.lm_head.num_elems());
         ter::dequantize(tx.lm_head, lm_full.data());
         W_lm = lm_full.data();
@@ -218,7 +225,8 @@ std::vector<float> forward_token(
 BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader, int max_seq_len,
                                           int n_trits, bool format_a_roundtrip,
                                           int format_a_mant_trits,
-                                          bool bitnet_roundtrip) {
+                                          bool bitnet_roundtrip, int block_size,
+                                          bool store_fp32) {
     BrandonTransformer tx;
     const auto& cfg = loader.config();
 
@@ -240,6 +248,7 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader, int max_
     tx.intermediate_size  = cfg.intermediate_size;
     tx.n_layers           = cfg.n_layers;
     tx.rmsnorm_eps        = cfg.norm_eps;
+    tx.rope_theta         = cfg.rope_theta;
     tx.n_registers        = 0;
     tx.use_dwa            = false;
     tx.use_value_residual = false;
@@ -251,16 +260,17 @@ BrandonTransformer load_llama_transformer(const nt::GGUFLoader& loader, int max_
 
     tx.blocks.reserve(static_cast<size_t>(tx.n_layers));
     for (int i = 0; i < tx.n_layers; ++i) {
-        tx.blocks.push_back(build_block(loader, i, n_trits, format_a_roundtrip, format_a_mant_trits, bitnet_roundtrip));
+        tx.blocks.push_back(build_block(loader, i, n_trits, format_a_roundtrip,
+                                        format_a_mant_trits, bitnet_roundtrip, block_size, store_fp32));
     }
 
-    tx.token_embd    = quant_t(loader.get_tensor("token_embd.weight"), n_trits, format_a_roundtrip, format_a_mant_trits, bitnet_roundtrip);
+    tx.token_embd    = quant_t(loader.get_tensor("token_embd.weight"), n_trits, format_a_roundtrip, format_a_mant_trits, bitnet_roundtrip, /*block*/0, /*transpose*/false, store_fp32);
     tx.output_norm_w = as_floats(loader.get_tensor("output_norm.weight"));
 
     // If the GGUF carries a separate output.weight (TinyStories Q4_K_M does),
     // it overrides the tied projection. weight_tying flips off in that case.
     if (loader.tensor_info("output.weight") != nullptr) {
-        tx.lm_head      = quant_t(loader.get_tensor("output.weight"), n_trits, format_a_roundtrip, format_a_mant_trits, bitnet_roundtrip);
+        tx.lm_head      = quant_t(loader.get_tensor("output.weight"), n_trits, format_a_roundtrip, format_a_mant_trits, bitnet_roundtrip, /*block*/0, /*transpose*/false, store_fp32);
         tx.weight_tying = false;
     }
 
@@ -292,6 +302,8 @@ BrandonTransformer load_bitnet_transformer(const nt::GGUFLoader& loader, int max
     tx.intermediate_size  = cfg.intermediate_size;
     tx.n_layers           = cfg.n_layers;
     tx.rmsnorm_eps        = cfg.norm_eps;
+    tx.rope_theta         = cfg.rope_theta;
+    tx.ffn_relu2          = true;   // BitNet 2B-4T uses ReLU²·up FFN
     tx.n_registers        = 0;
     tx.use_dwa            = false;
     tx.use_value_residual = false;

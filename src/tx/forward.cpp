@@ -6,7 +6,42 @@
 
 namespace ter::tx {
 
+// FP-bypass: when true, forward_layer skips activation quantization and does
+// float matmuls with dequantized weights. Diagnostic to isolate whether the
+// degenerate output comes from activation quantization (9-trit per-tensor) or
+// from the forward path itself. Default false → normal ternary forward.
+static bool g_fp_bypass = false;
+void set_forward_fp_bypass(bool b) noexcept { g_fp_bypass = b; }
+
 namespace {
+
+// Float matmul with on-the-fly weight dequantization (per-tensor or per-block).
+// Used by forward_layer when g_fp_bypass is set: x stays float (no activation
+// quantization), weights dequantized from their TritTensor payload.
+void mm_row_fp(const std::vector<float>& x, const TritTensor& Wt,
+               int K, int N, std::vector<float>& out) {
+    out.assign(static_cast<size_t>(N), 0.0f);
+    std::vector<double> acc(static_cast<size_t>(N), 0.0);
+    const bool is_fp32  = !Wt.fp32.empty();
+    const bool blocked  = !Wt.block_scales.empty();
+    const int  bs       = Wt.block_size;
+    for (int kk = 0; kk < K; ++kk) {
+        const double xv = static_cast<double>(x[static_cast<size_t>(kk)]);
+        if (xv == 0.0) continue;
+        const size_t base = static_cast<size_t>(kk) * static_cast<size_t>(N);
+        for (int j = 0; j < N; ++j) {
+            const size_t idx = base + static_cast<size_t>(j);
+            const double w =
+                is_fp32 ? static_cast<double>(Wt.fp32[idx])
+              : blocked ? static_cast<double>(Wt.payload[idx]) *
+                          static_cast<double>(Wt.block_scales[idx / static_cast<size_t>(bs)])
+                        : static_cast<double>(Wt.payload[idx]) * static_cast<double>(Wt.scale);
+            acc[static_cast<size_t>(j)] += xv * w;
+        }
+    }
+    for (int j = 0; j < N; ++j)
+        out[static_cast<size_t>(j)] = static_cast<float>(acc[static_cast<size_t>(j)]);
+}
 
 // Sim memory map for forward_layer (single-token, single-layer).
 // Kernel-code occupies [0, 511]; data starts >= 512.
@@ -35,10 +70,10 @@ void rmsnorm_host(const std::vector<float>& x, const std::vector<float>& w,
 }
 
 // Apply RoPE in-place to a head_dim vector at position pos (interleaved Llama 3 layout).
-void rope_host(std::vector<float>& v, int pos, int head_dim) {
+void rope_host(std::vector<float>& v, int pos, int head_dim, double theta = 10000.0) {
     int n_pairs = head_dim / 2;
     for (int k = 0; k < n_pairs; ++k) {
-        double freq = 1.0 / std::pow(10000.0, (2.0 * k) / static_cast<double>(head_dim));
+        double freq = 1.0 / std::pow(theta, (2.0 * k) / static_cast<double>(head_dim));
         double angle = static_cast<double>(pos) * freq;
         double c = std::cos(angle), s = std::sin(angle);
         float x0 = v[2 * k], x1 = v[2 * k + 1];
@@ -67,6 +102,17 @@ void silu_mul_host(const std::vector<float>& gate, const std::vector<float>& up,
     for (size_t i = 0; i < gate.size(); ++i) {
         double s = 1.0 / (1.0 + std::exp(-static_cast<double>(gate[i])));
         y[i] = static_cast<float>(static_cast<double>(gate[i]) * s * static_cast<double>(up[i]));
+    }
+}
+
+// ReLU²-gated FFN (BitNet b1.58 2B-4T): y[i] = relu(gate[i])^2 * up[i].
+void relu2_mul_host(const std::vector<float>& gate, const std::vector<float>& up,
+                    std::vector<float>& y) {
+    y.assign(gate.size(), 0.0f);
+    for (size_t i = 0; i < gate.size(); ++i) {
+        double g = static_cast<double>(gate[i]);
+        double r = g > 0.0 ? g * g : 0.0;
+        y[i] = static_cast<float>(r * static_cast<double>(up[i]));
     }
 }
 
@@ -119,7 +165,7 @@ void rmsnorm_kernel(Sim& sim, KernelTable& kt, KernelId id_rms,
 // v: head-dim float vector, modified in-place.
 // tk_rope args: x_addr, cos_addr, sin_addr, rotated_x_addr, y_addr, 0, 0
 void rope_kernel(Sim& sim, KernelTable& kt, KernelId id_rope,
-                 std::vector<float>& v, int pos, int head_dim) {
+                 std::vector<float>& v, int pos, int head_dim, double theta = 10000.0) {
     constexpr int VEC_LANES = 27;
     constexpr int OUT_SCALE = 9841;
     int n_pairs = head_dim / 2;
@@ -132,7 +178,7 @@ void rope_kernel(Sim& sim, KernelTable& kt, KernelId id_rope,
     std::vector<int> sin_vec(VEC_LANES, 0);
     std::vector<int> rotated_x(VEC_LANES, 0);
     for (int k = 0; k < n_pairs; ++k) {
-        double freq = 1.0 / std::pow(10000.0, (2.0 * k) / double(head_dim));
+        double freq = 1.0 / std::pow(theta, (2.0 * k) / double(head_dim));
         double angle = double(pos) * freq;
         int c_int = static_cast<int>(std::round(std::cos(angle) * OUT_SCALE));
         int s_int = static_cast<int>(std::round(std::sin(angle) * OUT_SCALE));
@@ -251,21 +297,47 @@ void mm_row(Sim& sim, KernelTable& kt, KernelId /*id_mm*/,
             int K, int N,
             std::vector<float>& out) {
     out.assign(static_cast<size_t>(N), 0.0f);
-    std::vector<int64_t> acc(static_cast<size_t>(N), 0);
     const int32_t* Xp = Xt.payload.data() + static_cast<size_t>(row) * static_cast<size_t>(K);
     const int32_t* Wp = Wt.payload.data();
-    for (int k = 0; k < K; ++k) {
-        int32_t xv = Xp[k];
-        if (xv == 0) continue;          // sparse trit fast-path
-        int64_t xv64 = static_cast<int64_t>(xv);
-        const int32_t* w_row = Wp + static_cast<size_t>(k) * static_cast<size_t>(N);
-        for (int j = 0; j < N; ++j) {
-            acc[static_cast<size_t>(j)] += xv64 * static_cast<int64_t>(w_row[j]);
+
+    if (!Wt.block_scales.empty()) {
+        // Per-block weights: scale varies within the tensor, so apply it during
+        // accumulation. Each W element W[k*N+j] uses block (k*N+j)/block_size.
+        const int bs = Wt.block_size;
+        std::vector<double> facc(static_cast<size_t>(N), 0.0);
+        for (int k = 0; k < K; ++k) {
+            int32_t xv = Xp[k];
+            if (xv == 0) continue;
+            const double xvd = static_cast<double>(xv);
+            const size_t base = static_cast<size_t>(k) * static_cast<size_t>(N);
+            const int32_t* w_row = Wp + base;
+            for (int j = 0; j < N; ++j) {
+                const size_t blk = (base + static_cast<size_t>(j))
+                                   / static_cast<size_t>(bs);
+                facc[static_cast<size_t>(j)] +=
+                    xvd * static_cast<double>(w_row[j])
+                        * static_cast<double>(Wt.block_scales[blk]);
+            }
         }
-    }
-    float s = Xt.scale * Wt.scale;
-    for (int j = 0; j < N; ++j) {
-        out[static_cast<size_t>(j)] = static_cast<float>(acc[static_cast<size_t>(j)]) * s;
+        const float xs = Xt.scale;
+        for (int j = 0; j < N; ++j)
+            out[static_cast<size_t>(j)] =
+                static_cast<float>(facc[static_cast<size_t>(j)] * static_cast<double>(xs));
+    } else {
+        std::vector<int64_t> acc(static_cast<size_t>(N), 0);
+        for (int k = 0; k < K; ++k) {
+            int32_t xv = Xp[k];
+            if (xv == 0) continue;          // sparse trit fast-path
+            int64_t xv64 = static_cast<int64_t>(xv);
+            const int32_t* w_row = Wp + static_cast<size_t>(k) * static_cast<size_t>(N);
+            for (int j = 0; j < N; ++j) {
+                acc[static_cast<size_t>(j)] += xv64 * static_cast<int64_t>(w_row[j]);
+            }
+        }
+        float s = Xt.scale * Wt.scale;
+        for (int j = 0; j < N; ++j) {
+            out[static_cast<size_t>(j)] = static_cast<float>(acc[static_cast<size_t>(j)]) * s;
+        }
     }
     // Account TVMACs analytically: kernel-routed path would issue ceil(K/27)
     // tile invocations per output cell.
@@ -289,6 +361,8 @@ void forward_layer(
     int n_kv_heads,
     int intermediate_size,
     float rmsnorm_eps,
+    double rope_theta,
+    bool ffn_relu2,
     const LutAddrs& luts,
     std::vector<float>& hidden_out,
     BrandonState* state,
@@ -310,13 +384,19 @@ void forward_layer(
         rmsnorm_host(hidden_in, L.attn_norm_w, rmsnorm_eps, x_norm);
 
     // 2) Q = x_norm @ Wq,  K = x_norm @ Wk,  V = x_norm @ Wv
-    TritTensor xt = quantize(x_norm.data(), {1, hidden_size}, 9);
     std::vector<float> q, k, v;
     const int q_dim  = n_heads    * head_dim;
     const int kv_dim = n_kv_heads * head_dim;
-    mm_row(sim, kt, id_mm, xt, 0, L.Wq, hidden_size, q_dim,  q);
-    mm_row(sim, kt, id_mm, xt, 0, L.Wk, hidden_size, kv_dim, k);
-    mm_row(sim, kt, id_mm, xt, 0, L.Wv, hidden_size, kv_dim, v);
+    if (g_fp_bypass) {
+        mm_row_fp(x_norm, L.Wq, hidden_size, q_dim,  q);
+        mm_row_fp(x_norm, L.Wk, hidden_size, kv_dim, k);
+        mm_row_fp(x_norm, L.Wv, hidden_size, kv_dim, v);
+    } else {
+        TritTensor xt = quantize(x_norm.data(), {1, hidden_size}, 9);
+        mm_row(sim, kt, id_mm, xt, 0, L.Wq, hidden_size, q_dim,  q);
+        mm_row(sim, kt, id_mm, xt, 0, L.Wk, hidden_size, kv_dim, k);
+        mm_row(sim, kt, id_mm, xt, 0, L.Wv, hidden_size, kv_dim, v);
+    }
 
     // 2.5) Brandon value_residual hook (§4b of integration guide).
     // V from layer 0 is captured per-token; later layers add v_first to V (no learned alpha).
@@ -336,18 +416,18 @@ void forward_layer(
         std::vector<float> qh(q.begin() + h * head_dim,
                               q.begin() + (h + 1) * head_dim);
         if (head_dim <= 26)  // even pairs only fit cleanly within 27 lanes
-            rope_kernel(sim, kt, id_rope, qh, pos, head_dim);
+            rope_kernel(sim, kt, id_rope, qh, pos, head_dim, rope_theta);
         else
-            rope_host(qh, pos, head_dim);
+            rope_host(qh, pos, head_dim, rope_theta);
         std::copy(qh.begin(), qh.end(), q.begin() + h * head_dim);
     }
     for (int h = 0; h < n_kv_heads; ++h) {
         std::vector<float> kh(k.begin() + h * head_dim,
                               k.begin() + (h + 1) * head_dim);
         if (head_dim <= 26)
-            rope_kernel(sim, kt, id_rope, kh, pos, head_dim);
+            rope_kernel(sim, kt, id_rope, kh, pos, head_dim, rope_theta);
         else
-            rope_host(kh, pos, head_dim);
+            rope_host(kh, pos, head_dim, rope_theta);
         std::copy(kh.begin(), kh.end(), k.begin() + h * head_dim);
     }
 
@@ -406,9 +486,13 @@ void forward_layer(
         rmsnorm_host(ctx, L.attn_sub_norm_w, rmsnorm_eps, ctx_normed);
         ctx = std::move(ctx_normed);
     }
-    TritTensor ctxt = quantize(ctx.data(), {1, q_dim}, 9);
     std::vector<float> attn_out;
-    mm_row(sim, kt, id_mm, ctxt, 0, L.Wo, q_dim, hidden_size, attn_out);
+    if (g_fp_bypass) {
+        mm_row_fp(ctx, L.Wo, q_dim, hidden_size, attn_out);
+    } else {
+        TritTensor ctxt = quantize(ctx.data(), {1, q_dim}, 9);
+        mm_row(sim, kt, id_mm, ctxt, 0, L.Wo, q_dim, hidden_size, attn_out);
+    }
 
     // 6) Residual: hidden_mid = hidden_in + attn_out
     std::vector<float> hidden_mid(static_cast<size_t>(hidden_size));
@@ -426,14 +510,21 @@ void forward_layer(
         rmsnorm_host(hidden_mid, L.ffn_norm_w, rmsnorm_eps, mid_norm);
 
     // 8) gate = mid_norm @ Wgate;  up = mid_norm @ Wup
-    TritTensor mt = quantize(mid_norm.data(), {1, hidden_size}, 9);
     std::vector<float> gate, up;
-    mm_row(sim, kt, id_mm, mt, 0, L.Wgate, hidden_size, intermediate_size, gate);
-    mm_row(sim, kt, id_mm, mt, 0, L.Wup,   hidden_size, intermediate_size, up);
+    if (g_fp_bypass) {
+        mm_row_fp(mid_norm, L.Wgate, hidden_size, intermediate_size, gate);
+        mm_row_fp(mid_norm, L.Wup,   hidden_size, intermediate_size, up);
+    } else {
+        TritTensor mt = quantize(mid_norm.data(), {1, hidden_size}, 9);
+        mm_row(sim, kt, id_mm, mt, 0, L.Wgate, hidden_size, intermediate_size, gate);
+        mm_row(sim, kt, id_mm, mt, 0, L.Wup,   hidden_size, intermediate_size, up);
+    }
 
-    // 9) SwiGLU: SiLU(gate) * up (kernel for N<=27, host for N>27)
+    // 9) FFN activation: SwiGLU (SiLU·up) for Llama, ReLU²·up for BitNet 2B-4T.
     std::vector<float> ff;
-    if (intermediate_size <= 27)
+    if (ffn_relu2)
+        relu2_mul_host(gate, up, ff);
+    else if (intermediate_size <= 27)
         silu_mul_kernel(sim, kt, id_silu, gate, up, luts.sigmoid, ff);
     else
         silu_mul_host(gate, up, ff);
@@ -445,9 +536,13 @@ void forward_layer(
         rmsnorm_host(ff, L.ffn_sub_norm_w, rmsnorm_eps, ff_normed);
         ff = std::move(ff_normed);
     }
-    TritTensor fft = quantize(ff.data(), {1, intermediate_size}, 9);
     std::vector<float> ff_out;
-    mm_row(sim, kt, id_mm, fft, 0, L.Wdown, intermediate_size, hidden_size, ff_out);
+    if (g_fp_bypass) {
+        mm_row_fp(ff, L.Wdown, intermediate_size, hidden_size, ff_out);
+    } else {
+        TritTensor fft = quantize(ff.data(), {1, intermediate_size}, 9);
+        mm_row(sim, kt, id_mm, fft, 0, L.Wdown, intermediate_size, hidden_size, ff_out);
+    }
 
     // 11) Residual: hidden_out = hidden_mid + ff_out
     hidden_out.assign(static_cast<size_t>(hidden_size), 0.0f);

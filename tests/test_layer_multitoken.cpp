@@ -181,7 +181,7 @@ TEST_CASE("forward_layer multi-token causal attention matches numpy") {
     std::vector<std::vector<float>> outs(SEQ);
     for (int pos = 0; pos < SEQ; ++pos) {
         forward_layer(s, kt, L, cache, hidden_in_seq[pos], pos,
-                      H, HD, Hn, Kn, I, 1e-6f, luts, outs[pos]);
+                      H, HD, Hn, Kn, I, 1e-6f, 10000.0, false, luts, outs[pos]);
     }
 
     // Compare every position's output.

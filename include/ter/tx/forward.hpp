@@ -38,6 +38,11 @@ struct BrandonState {
     const float* dwa_weights = nullptr; // (n_layers+1)*n_layers row-major; weights[L*(n_layers+1)+j]
 };
 
+// Diagnostic: when enabled, forward_layer skips activation quantization and
+// runs float matmuls with dequantized weights. Isolates activation-quant /
+// forward-correctness from weight quantization. Default off.
+void set_forward_fp_bypass(bool enabled) noexcept;
+
 void forward_layer(
     Sim& sim,
     KernelTable& kt,
@@ -51,6 +56,8 @@ void forward_layer(
     int n_kv_heads,
     int intermediate_size,
     float rmsnorm_eps,
+    double rope_theta,
+    bool ffn_relu2,
     const LutAddrs& luts,
     std::vector<float>& hidden_out,
     BrandonState* state = nullptr,           // nullptr = vanilla Llama
